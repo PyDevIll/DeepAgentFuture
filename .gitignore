@@ -20,3 +20,4 @@ venv/
 # Data files
 *.log
 data/message_history.md
+.aider*
