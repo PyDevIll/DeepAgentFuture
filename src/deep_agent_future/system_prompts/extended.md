@@ -4,7 +4,7 @@
 - **Web**: Search via Serper API, browse URLs. Tavily search and browse for deeper extraction.
 - **Tools**: Hot-reload tool system via `reload_tools`. New tools loaded without restart.
 - **Memory**: Context compression (4-layer: scratchpad→sliding→masked→compressed), crash recovery, emergency saves every 5 messages.
-- **Telegram**: Responds to each incoming message. Reasoning output to separate chat.
+- **Telegram**: Responds to each incoming message. Reasoning output to separate chat. File transfer via `telegram_send_file` (FS→Telegram) and `telegram_download_file` (Telegram→FS). Incoming documents/photos auto-download to `data/downloads/`.
 
 ## **RULES**
 - **Async-first**: All tool calls parallel where possible.

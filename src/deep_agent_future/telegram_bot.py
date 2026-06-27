@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional, Callable, Awaitable
 
 import httpx
@@ -13,6 +14,21 @@ from loguru import logger
 
 MIN_POLL_PERIOD = timedelta(seconds=3)
 LONG_POLL_TIMEOUT = 60
+
+
+# --- Module-level singleton for tool access ---
+_bot_instance: Optional['TelegramBot'] = None
+
+
+def get_bot() -> Optional['TelegramBot']:
+    """Get the current TelegramBot instance (for tool access)."""
+    return _bot_instance
+
+
+def set_bot(bot: 'TelegramBot') -> None:
+    """Set the global TelegramBot instance."""
+    global _bot_instance
+    _bot_instance = bot
 
 
 def _escape_markdown(text: str) -> str:
@@ -43,6 +59,8 @@ class TelegramBot:
         self._offset: int = 0
         self._running: bool = False
         self._message_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._file_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._file_handler: Optional[Callable[[dict], Awaitable[None]]] = None
 
         if not self._token:
             logger.warning("TELEGRAM_BOT_TOKEN not set!")
@@ -90,12 +108,137 @@ class TelegramBot:
         """Reply to a user in their chat."""
         await self.send_message(chat_id, text)
 
-    async def _poll_updates(self) -> list[dict]:
+    # --- File transfer methods ---
+
+    async def send_document(
+        self,
+        chat_id: int,
+        file_path: str,
+        caption: Optional[str] = None,
+    ) -> dict:
+        """
+        Send a document from local filesystem to a Telegram chat.
+
+        Args:
+            chat_id: Telegram chat ID
+            file_path: Absolute path to file on filesystem
+            caption: Optional caption text
+
+        Returns:
+            API response dict with file_id etc.
+        """
+        path = Path(file_path).resolve()
+        if not path.exists():
+            return {"ok": False, "error": f"File not found: {file_path}"}
+        if not path.is_file():
+            return {"ok": False, "error": f"Not a regular file: {file_path}"}
+
+        file_size = path.stat().st_size
+        max_size = 50 * 1024 * 1024  # 50 MB Telegram limit
+
+        if file_size > max_size:
+            return {
+                "ok": False,
+                "error": f"File too large: {file_size} bytes (max {max_size})",
+            }
+
+        url = f"{self._base_url}/sendDocument"
+
+        # Read file in thread to avoid blocking
+        file_bytes = await asyncio.to_thread(path.read_bytes)
+
+        try:
+            async with httpx.AsyncClient(proxy="socks5://127.0.0.1:1080") as client:
+                data = {"chat_id": str(chat_id)}
+                if caption:
+                    data["caption"] = caption
+
+                resp = await client.post(
+                    url,
+                    data=data,
+                    files={"document": (path.name, file_bytes)},
+                    timeout=120.0,
+                )
+                result = resp.json()
+                if result.get("ok"):
+                    logger.info(f"Sent document '{path.name}' to chat {chat_id}")
+                else:
+                    logger.error(f"sendDocument failed: {result}")
+                return result
+        except Exception as e:
+            logger.error(f"sendDocument error: {e}")
+            return {"ok": False, "error": str(e)}
+
+    async def _get_file_info(self, file_id: str) -> Optional[dict]:
+        """Get file info from Telegram by file_id."""
+        result = await self._api_call("getFile", {"file_id": file_id})
+        if result.get("ok"):
+            return result["result"]
+        logger.error(f"getFile failed for {file_id}: {result}")
+        return None
+
+    async def download_file(
+        self,
+        file_id: str,
+        destination: str,
+    ) -> dict:
+        """
+        Download a file from Telegram and save to filesystem.
+
+        Args:
+            file_id: Telegram file ID
+            destination: Absolute path or directory to save file.
+                         If directory, original filename is appended.
+
+        Returns:
+            dict with ok, path, file_size, file_name
+        """
+        # Resolve file info
+        file_info = await self._get_file_info(file_id)
+        if not file_info:
+            return {"ok": False, "error": f"Could not get file info for {file_id}"}
+
+        file_path = file_info.get("file_path")
+        if not file_path:
+            return {"ok": False, "error": "No file_path in response"}
+
+        file_size = file_info.get("file_size", 0)
+        orig_name = Path(file_path).name
+
+        # Determine destination path
+        dest = Path(destination).resolve()
+        if dest.is_dir():
+            dest = dest / orig_name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+        # Download from Telegram file server
+        download_url = f"https://api.telegram.org/file/bot{self._token}/{file_path}"
+
+        try:
+            async with httpx.AsyncClient(proxy="socks5://127.0.0.1:1080") as client:
+                resp = await client.get(download_url, timeout=300.0)
+                resp.raise_for_status()
+                # Write to disk in thread to avoid blocking
+                await asyncio.to_thread(dest.write_bytes, resp.content)
+
+            logger.info(f"Downloaded '{orig_name}' ({file_size} bytes) → {dest}")
+            return {
+                "ok": True,
+                "path": str(dest),
+                "file_size": file_size,
+                "file_name": orig_name,
+            }
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            return {"ok": False, "error": str(e)}
+
+    async def _poll_updates(self):
         """Fetch new updates via long polling."""
         params = {
             "offset": self._offset,
             "timeout": LONG_POLL_TIMEOUT,
             "allowed_updates": ["message"],
+            # Note: Telegram API accepts list; documents come as message type
         }
         result = await self._api_call("getUpdates", params)
         if result.get("ok"):
@@ -120,20 +263,44 @@ class TelegramBot:
                     self._offset = update["update_id"] + 1
                     if "message" in update:
                         msg = update["message"]
-                        # Only handle text messages
+                        # Handle text messages
                         if "text" in msg:
                             await self._message_queue.put(msg)
+                        # Handle documents (files)
+                        elif "document" in msg:
+                            await self._file_queue.put(msg)
+                        # Handle photos as documents (get largest size)
+                        elif "photo" in msg:
+                            await self._file_queue.put(msg)
 
-                # Process queue
+                # Process text message queue
                 while not self._message_queue.empty():
                     msg = await self._message_queue.get()
                     await message_handler(msg)
+
+                # Process file queue
+                while not self._file_queue.empty():
+                    msg = await self._file_queue.get()
+                    if self._file_handler:
+                        await self._file_handler(msg)
+                    else:
+                        logger.warning(
+                            f"Received file but no file_handler set: "
+                            f"{msg.get('document', msg.get('photo', {}))}"
+                        )
 
             except Exception as e:
                 logger.error(f"Polling error: {e}")
                 await asyncio.sleep(5)
 
         logger.info("Telegram polling stopped")
+
+    def set_file_handler(
+        self,
+        handler: Callable[[dict], Awaitable[None]],
+    ) -> None:
+        """Set handler for incoming file messages (documents/photos)."""
+        self._file_handler = handler
 
     def stop(self) -> None:
         self._running = False

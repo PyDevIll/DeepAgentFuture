@@ -39,6 +39,10 @@
 - `fs_write_file` — Write complete file content (whole-file rewrite)
 - `fs_edit_blocks` — Apply multiple SEARCH/REPLACE edit blocks at once
 
+### Telegram (`telegram_*`)
+- `telegram_send_file` — Send file from filesystem to Telegram chat by absolute path
+- `telegram_download_file` — Download file from Telegram to filesystem using file_id
+
 ### Meta
 - `reload_tools` — Hot-reload all builtin tool modules without restarting
 

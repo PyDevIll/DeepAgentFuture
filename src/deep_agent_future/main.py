@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from agent import Agent, NOW
-from telegram_bot import TelegramBot
+from telegram_bot import TelegramBot, set_bot
 from tool_registry import get_registry
 from builtin_tools import register_all as register_builtin_tools
 import sys
@@ -79,6 +79,48 @@ async def main() -> None:
     bot = TelegramBot(
         reasoning_chat_id=-1003969262771
     )
+
+    # Make bot accessible to tools
+    set_bot(bot)
+
+    # File handler: auto-download incoming files to data/downloads/
+    DOWNLOADS_DIR = Path(__file__).resolve().parent / "data" / "downloads"
+    DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+    async def handle_file(msg: dict) -> None:
+        """Auto-download incoming documents/photos."""
+        chat_id = msg["chat"]["id"]
+        doc = msg.get("document")
+        photo = msg.get("photo")
+
+        if doc:
+            file_id = doc["file_id"]
+            file_name = doc.get("file_name", file_id)
+            logger.info(f"Document from {chat_id}: {file_name} ({doc.get('file_size', 0)} bytes)")
+            result = await bot.download_file(file_id, str(DOWNLOADS_DIR))
+            if result.get("ok"):
+                await bot.send_message(
+                    chat_id,
+                    f"📥 Downloaded: `{result['file_name']}` ({result['file_size']} bytes)",
+                )
+            else:
+                await bot.send_message(chat_id, f"❌ Failed: {result.get('error')}")
+
+        elif photo:
+            # Get largest photo size
+            largest = max(photo, key=lambda p: p.get("file_size", 0))
+            file_id = largest["file_id"]
+            logger.info(f"Photo from {chat_id}: {largest.get('file_size', 0)} bytes")
+            result = await bot.download_file(file_id, str(DOWNLOADS_DIR))
+            if result.get("ok"):
+                await bot.send_message(
+                    chat_id,
+                    f"📥 Downloaded photo: `{result['file_name']}` ({result['file_size']} bytes)",
+                )
+            else:
+                await bot.send_message(chat_id, f"❌ Failed: {result.get('error')}")
+
+    bot.set_file_handler(handle_file)
 
     # Message handler
     async def handle_message(msg: dict) -> None:
