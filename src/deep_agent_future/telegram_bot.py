@@ -16,20 +16,20 @@ MIN_POLL_PERIOD = timedelta(seconds=3)
 LONG_POLL_TIMEOUT = 60
 
 
-# --- Module-level singleton for tool access ---
-_bot_instance: Optional['TelegramBot'] = None
-
-
-def get_bot() -> Optional['TelegramBot']:
-    """Get the current TelegramBot instance (for tool access)."""
-    return _bot_instance
-
-
-def set_bot(bot: 'TelegramBot') -> None:
-    """Set the global TelegramBot instance."""
-    global _bot_instance
-    _bot_instance = bot
-
+# # --- Module-level singleton for tool access ---
+# _bot_instance: Optional['TelegramBot'] = None
+#
+#
+# def get_bot() -> Optional['TelegramBot']:
+#     """Get the current TelegramBot instance (for tool access)."""
+#     return _bot_instance
+#
+#
+# def set_bot(bot: 'TelegramBot') -> None:
+#     """Set the global TelegramBot instance."""
+#     global _bot_instance
+#     _bot_instance = bot
+#
 
 def _escape_markdown(text: str) -> str:
     """Escape special characters for Telegram MarkdownV2."""

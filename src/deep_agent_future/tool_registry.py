@@ -30,14 +30,29 @@ class ToolRegistry:
         self._tools: Dict[str, ToolDef] = {}
         self._version: int = 0
         self._loaded_modules: set[str] = set()
+        self._bot = None
+
+    def set_bot(self, bot) -> None:
+        """Store the Telegram bot instance for tools to use."""
+        self._bot = bot
+        if not self._bot:
+            logger.error(f"Failed to set bot for tool {self._tools_package}")
+
+    def get_bot(self):
+        """Retrieve the stored bot instance."""
+        if not self._bot:
+            logger.error(f"Failed to get bot for tool {self._tools_package}")
+        return self._bot
 
     @property
     def version(self) -> int:
         return self._version
 
+
     @property
     def tool_names(self) -> list[str]:
         return list(self._tools.keys())
+
 
     def register(
         self,
@@ -59,6 +74,7 @@ class ToolRegistry:
             return func
         return wrapper
 
+
     def register_function(
         self, func: Callable, name: str, description: str,
         parameters: Optional[dict] = None,
@@ -70,8 +86,10 @@ class ToolRegistry:
         )
         self._version += 1
 
+
     def get_tool(self, name: str) -> Optional[ToolDef]:
         return self._tools.get(name)
+
 
     def get_openai_tools(self) -> list[dict]:
         tools = []
@@ -86,6 +104,7 @@ class ToolRegistry:
             })
         return tools
 
+
     async def call_tool(self, tool_name: str, **kwargs: Any) -> str:
         tdef = self._tools.get(tool_name)
         if not tdef:
@@ -97,7 +116,9 @@ class ToolRegistry:
             logger.error(f"Tool '{tool_name}' error: {e}")
             return f"Error executing '{tool_name}': {e}"
 
+
     def hot_reload(self) -> int:
+        """Reload all submodules and re-register their tools."""
         reloaded = 0
         package = self._tools_package
         if package not in sys.modules:
@@ -124,8 +145,14 @@ class ToolRegistry:
                     reloaded += 1
                 except Exception as e:
                     logger.error(f"Failed to load '{mod_name}': {e}")
+        # Critical: re-register all tools after module reloads
+        try:
+            from deep_agent_future.builtin_tools import register_all
+            register_all(self)
+            logger.info(f"Registry reloaded: {reloaded} modules, {len(self._tools)} tools re-registered")
+        except ImportError as e:
+            logger.error(f"Failed to import register_all: {e}")
         self._version += 1
-        logger.info(f"Registry reloaded: {reloaded} modules, {len(self._tools)} tools")
         return reloaded
 
     def list_tools(self) -> str:
@@ -133,12 +160,19 @@ class ToolRegistry:
         for tool_name, tdef in sorted(self._tools.items()):
             lines.append(f"  {tool_name}: {tdef.description[:80]}")
         return '\n'.join(lines)
-
-
 _registry: Optional[ToolRegistry] = None
+_registry_initialized: bool = False
+
 
 def get_registry() -> ToolRegistry:
-    global _registry
+    global _registry, _registry_initialized
     if _registry is None:
         _registry = ToolRegistry()
+    if not _registry_initialized:
+        try:
+            from deep_agent_future.builtin_tools import register_all
+            register_all(_registry)
+            _registry_initialized = True
+        except ImportError:
+            logger.error("Cannot auto-register builtin tools (import failed)")
     return _registry

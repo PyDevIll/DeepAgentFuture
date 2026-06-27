@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from agent import Agent, NOW
-from telegram_bot import TelegramBot, set_bot
+from telegram_bot import TelegramBot
 from tool_registry import get_registry
 from builtin_tools import register_all as register_builtin_tools
 import sys
@@ -79,9 +79,8 @@ async def main() -> None:
     bot = TelegramBot(
         reasoning_chat_id=-1003969262771
     )
-
-    # Make bot accessible to tools
-    set_bot(bot)
+    registry = get_registry()
+    registry.set_bot(bot)
 
     # File handler: auto-download incoming files to data/downloads/
     DOWNLOADS_DIR = Path(__file__).resolve().parent / "data" / "downloads"
@@ -133,9 +132,9 @@ async def main() -> None:
         async def reasoning_callback(thought: str) -> None:
             await bot.send_reasoning(thought)
 
-        # Run agent
+        enhanced_request = f"Current chat_id: {chat_id}\n\nUser request: {text}"
         response = await agent.run_with_crash_recovery(
-            initial_user_request=text,
+            initial_user_request=enhanced_request,
             reasoning_callback=reasoning_callback,
         )
 

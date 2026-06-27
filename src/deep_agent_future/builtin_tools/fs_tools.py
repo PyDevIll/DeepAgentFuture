@@ -139,21 +139,61 @@ async def fs_stat(path: str) -> str:
     return '\n'.join(lines)
 
 
-async def fs_grep(pattern: str, path: str = ".", ext: str = "", max_files: int = 500) -> str:
-    """Recursive case-insensitive text search. Skips binary/large files, limited scope."""
+
+async def fs_grep(
+    pattern: str,
+    path: str = ".",
+    ext: str = "",
+    max_files: int = 500,
+    regex: bool = False,
+    case_sensitive: bool = False,
+    max_size: int = 1_000_000,
+    force_text: bool = False,
+) -> str:
+    """
+    Recursive text search with advanced options. Skips binary/large files by default.
+
+    Args:
+        pattern: Search string or regex pattern (if regex=True).
+        path: Directory or file to search (default: .).
+        ext: File extension filter (e.g., ".py").
+        max_files: Maximum number of files to scan (default: 500).
+        regex: If True, treat pattern as a regular expression.
+        case_sensitive: If True, perform case-sensitive search.
+        max_size: Maximum file size in bytes to read (0 = unlimited, default: 1MB).
+        force_text: If True, skip binary detection and read the file as text.
+
+    Returns:
+        String with matching lines (file:line:content) or error/summary.
+    """
     p = _safe_path(path)
     if not p.exists():
         return f"Path not found: {path}"
 
-    pattern_lower = pattern.lower()
+    # ── Single‑file mode ────────────────────────────────────────────────
+    if p.is_file():
+        return await _grep_single_file(
+            p, pattern, regex, case_sensitive, max_size, force_text
+        )
+
+    # ── Directory scan ──────────────────────────────────────────────────
+    pattern_lower = pattern.lower() if not regex else None
+    try:
+        if regex:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            pat = re.compile(pattern, flags)
+        else:
+            pat = None
+    except re.error as e:
+        return f"Invalid regex: {e}"
+
     matches: list[str] = []
-    files_scanned = 0
     skipped_binary = 0
     skipped_large = 0
-    MAX_FILE_SIZE = 1_000_000  # skip files > 1MB
     MAX_MATCHES = 100
+    files_scanned = 0
 
-    # Collect files first (fast) then process with limits
+    # Collect files (fast)
     files_to_search: list[Path] = []
     for fp in p.rglob("*"):
         if fp.is_file():
@@ -163,7 +203,7 @@ async def fs_grep(pattern: str, path: str = ".", ext: str = "", max_files: int =
             if len(files_to_search) >= max_files:
                 break
 
-    # Process files in thread pool (non-blocking)
+    # Process each file (non‑blocking with thread pool)
     def search_file(fp: Path) -> list[str]:
         local_matches: list[str] = []
         try:
@@ -171,22 +211,32 @@ async def fs_grep(pattern: str, path: str = ".", ext: str = "", max_files: int =
         except OSError:
             return local_matches
 
-        if fsize > MAX_FILE_SIZE:
+        # Size check
+        if max_size and fsize > max_size:
             return local_matches  # counted by caller
 
-        if _is_binary(str(fp)):
+        # Binary detection (unless forced)
+        if not force_text and _is_binary(str(fp)):
             return local_matches  # counted by caller
 
+        # Stream line by line to avoid memory blow
         try:
-            text = fp.read_text(encoding='utf-8', errors='replace')
-        except Exception:
-            return local_matches
-
-        for lineno, line in enumerate(text.split('\n'), 1):
-            if pattern_lower in line.lower():
-                local_matches.append(f"{fp}:{lineno}:{line.rstrip()}")
-                if len(local_matches) >= MAX_MATCHES:
-                    break
+            with open(fp, 'r', encoding='utf-8', errors='replace' if force_text else 'strict') as f:
+                for lineno, line in enumerate(f, 1):
+                    line = line.rstrip('\n')
+                    if regex:
+                        if pat.search(line):
+                            local_matches.append(f"{fp}:{lineno}:{line}")
+                    else:
+                        needle = pattern if case_sensitive else pattern_lower
+                        haystack = line if case_sensitive else line.lower()
+                        if needle in haystack:
+                            local_matches.append(f"{fp}:{lineno}:{line}")
+                    if len(local_matches) >= MAX_MATCHES:
+                        break
+        except (UnicodeDecodeError, PermissionError, OSError):
+            # If we can't read, treat as binary / inaccessible
+            pass
         return local_matches
 
     loop = asyncio.get_running_loop()
@@ -195,35 +245,101 @@ async def fs_grep(pattern: str, path: str = ".", ext: str = "", max_files: int =
         for fp in files_to_search:
             futures.append(loop.run_in_executor(pool, search_file, fp))
 
-        for i, future in enumerate(asyncio.as_completed(futures)):
+        for future in asyncio.as_completed(futures):
             try:
                 result = await future
                 matches.extend(result)
             except Exception:
                 pass
 
-    # Count skipped files by checking sizes
+    # Count skipped files by size / binary after the fact
     for fp in files_to_search:
         try:
-            if fp.stat().st_size > MAX_FILE_SIZE:
+            if max_size and fp.stat().st_size > max_size:
                 skipped_large += 1
-            elif _is_binary(str(fp)):
+            elif not force_text and _is_binary(str(fp)):
                 skipped_binary += 1
         except OSError:
             pass
 
+    # Build response
     skipped_msg = ""
     if skipped_binary or skipped_large:
         parts = []
         if skipped_binary:
             parts.append(f"{skipped_binary} binary")
         if skipped_large:
-            parts.append(f"{skipped_large} large (>1MB)")
+            parts.append(f"{skipped_large} large (> {human_size(max_size) if max_size else '∞'})")
         skipped_msg = f" (skipped: {', '.join(parts)} files)"
 
     if not matches:
         return f"No matches for '{pattern}' in {path}{skipped_msg}"
-    return '\n'.join(matches[:MAX_MATCHES]) + (f"\n\n... truncated to {MAX_MATCHES} matches{skipped_msg}" if len(matches) > MAX_MATCHES else skipped_msg and f"\n{skipped_msg}")
+
+    out = "\n".join(matches[:MAX_MATCHES])
+    if len(matches) > MAX_MATCHES:
+        out += f"\n\n... truncated to {MAX_MATCHES} matches"
+    if skipped_msg:
+        out += f"\n{skipped_msg}"
+    return out
+
+
+async def _grep_single_file(
+    fp: Path,
+    pattern: str,
+    regex: bool,
+    case_sensitive: bool,
+    max_size: int,
+    force_text: bool,
+) -> str:
+    """Search a single file with the same options."""
+    try:
+        fsize = fp.stat().st_size
+    except OSError as e:
+        return f"Error reading file: {e}"
+
+    if max_size and fsize > max_size and not force_text:
+        return (f"File {fp} exceeds size limit ({human_size(fsize)} > {human_size(max_size)}). "
+                "Use force_text=True or increase max_size.")
+
+    if not force_text and _is_binary(str(fp)):
+        return f"Binary file detected ({human_size(fsize)}). Use force_text=True to search anyway."
+
+    try:
+        if regex:
+            flags = 0 if case_sensitive else re.IGNORECASE
+            pat = re.compile(pattern, flags)
+        else:
+            pat = None
+    except re.error as e:
+        return f"Invalid regex: {e}"
+
+    matches = []
+    MAX_MATCHES = 100
+    try:
+        with open(fp, 'r', encoding='utf-8', errors='replace' if force_text else 'strict') as f:
+            for lineno, line in enumerate(f, 1):
+                line = line.rstrip('\n')
+                if regex:
+                    if pat.search(line):
+                        matches.append(f"{fp}:{lineno}:{line}")
+                else:
+                    needle = pattern if case_sensitive else pattern.lower()
+                    haystack = line if case_sensitive else line.lower()
+                    if needle in haystack:
+                        matches.append(f"{fp}:{lineno}:{line}")
+                if len(matches) >= MAX_MATCHES:
+                    break
+    except UnicodeDecodeError as e:
+        return f"Encoding error reading {fp}: {e}. Try force_text=True."
+    except Exception as e:
+        return f"Error reading {fp}: {e}"
+
+    if not matches:
+        return f"No matches for '{pattern}' in {fp}"
+    out = "\n".join(matches)
+    if len(matches) >= MAX_MATCHES:
+        out += f"\n\n... truncated to {MAX_MATCHES} matches"
+    return out
 
 
 async def fs_find(path: str = ".", name: str = "*") -> str:
@@ -394,12 +510,17 @@ TOOL_DEFINITIONS = [
         "properties": {"path": {"type": "string", "description": "Path"}},
         "required": ["path"],
     }),
-    ("fs_grep", fs_grep, "Recursive case-insensitive text search", {
+    ("fs_grep", fs_grep, "Recursive case‑insensitive text search with regex and size limits", {
         "type": "object",
         "properties": {
-            "pattern": {"type": "string", "description": "Search pattern"},
-            "path": {"type": "string", "description": "Directory to search (default: .)"},
-            "ext": {"type": "string", "description": "File extension filter (e.g. .py)"},
+            "pattern": {"type": "string", "description": "Search pattern (string or regex if regex=True)"},
+            "path": {"type": "string", "description": "Directory or file to search (default: .)"},
+            "ext": {"type": "string", "description": "File extension filter (e.g., .py)"},
+            "max_files": {"type": "integer", "description": "Max files to scan (default: 500)"},
+            "regex": {"type": "boolean", "description": "Treat pattern as regex (default: false)"},
+            "case_sensitive": {"type": "boolean", "description": "Case‑sensitive search (default: false)"},
+            "max_size": {"type": "integer", "description": "Max file size in bytes (0 = unlimited, default: 1MB)"},
+            "force_text": {"type": "boolean", "description": "Skip binary detection (default: false)"},
         },
         "required": ["pattern"],
     }),
