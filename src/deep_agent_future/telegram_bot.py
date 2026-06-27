@@ -53,7 +53,7 @@ class TelegramBot:
         """Make an async Telegram API call."""
         url = f"{self._base_url}/{method}"
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(proxy="socks5://127.0.0.1:1080") as client:
                 resp = await client.post(url, json=params, timeout=30.0)
                 return resp.json()
         except Exception as e:

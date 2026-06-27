@@ -8,10 +8,10 @@ from pathlib import Path
 from dotenv import load_dotenv
 from loguru import logger
 
-from .agent import Agent, NOW
-from .telegram_bot import TelegramBot
-from .tool_registry import get_registry
-from .builtin_tools import register_all as register_builtin_tools
+from agent import Agent, NOW
+from telegram_bot import TelegramBot
+from tool_registry import get_registry
+from builtin_tools import register_all as register_builtin_tools
 
 
 async def main() -> None:
@@ -38,7 +38,7 @@ async def main() -> None:
     # System prompt
     system_prompt = f"""## **IDENTITY**
 - **Name**: The Autonomous LLM-based Agent MASTERMIND v2
-- **Goal**: self‑sustained, continuously learning system  
+- **Goal**: self-sustained, continuously learning system  
 - **Language**: Laconic instructive command-like wide weighty formal sentences
 - **Environment**: Windows 10 system with access to file system and internet
 - **Time**: {NOW()}
@@ -72,7 +72,9 @@ async def main() -> None:
     agent.add_helper_agent(helper_agent)
 
     # Initialize Telegram bot
-    bot = TelegramBot()
+    bot = TelegramBot(
+        reasoning_chat_id=-1003969262771
+    )
 
     # Message handler
     async def handle_message(msg: dict) -> None:

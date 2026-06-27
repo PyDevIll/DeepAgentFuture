@@ -1,4 +1,4 @@
-"""MASTERMIND v2 — Core async agent loop."""
+"""MASTERMIND v2 — Core async agent loop. ContextPool v3 integrated."""
 
 from __future__ import annotations
 
@@ -12,11 +12,11 @@ from typing import Optional
 from openai import AsyncOpenAI
 from loguru import logger
 
-from .context_manager import ContextPool
-from .tool_registry import ToolRegistry, get_registry
+from context_manager import ContextPool
+from tool_registry import ToolRegistry, get_registry
 
 LLM_MAX_OUTPUT_TOKENS = 30000
-LLM_MODEL = "deepseek-reasoner"  # thinking mode enabled
+LLM_MODEL = "deepseek-v4-pro"  # thinking mode enabled
 
 
 def construct_history(prompts_list: list[tuple[str, Optional[str]]]) -> list[dict]:
@@ -42,7 +42,7 @@ def construct_history(prompts_list: list[tuple[str, Optional[str]]]) -> list[dic
 
 
 class Agent:
-    """Async reasoning agent with hot-reload tools and crash recovery."""
+    """Async reasoning agent with hot-reload tools, crash recovery, and layered context."""
 
     def __init__(
         self,
@@ -66,11 +66,12 @@ class Agent:
         self.messages = ContextPool()
         self._registry: ToolRegistry = get_registry()
 
-        # Load last memory into context
+        # Load last memory into context (from previous compression)
         if self._last_memory:
             self.messages.assign_messages(construct_history(self._last_memory))
 
-        logger.info(f"Agent '{name}' initialized ({LLM_MODEL})")
+        logger.info(f"Agent '{name}' initialized ({LLM_MODEL}), "
+                     f"crash recovery: {self.messages.length > 0}")
 
     def add_helper_agent(self, helper: Agent) -> None:
         self._helper_agent = helper
@@ -94,7 +95,20 @@ class Agent:
             }
 
         logger.info(f"Tool: {func_name}({json.dumps(args, ensure_ascii=False)[:200]})")
-        result = await self._registry.call_tool(func_name, **args)
+        try:
+            result = await asyncio.wait_for(
+                self._registry.call_tool(func_name, **args),
+                timeout=120.0  # 2-minute timeout per tool
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"Tool '{func_name}' timed out after 120s")
+            return {
+                "tool_call_id": tool_call.id,
+                "role": "tool",
+                "name": func_name,
+                "content": f"Error: tool '{func_name}' timed out (>120s). "
+                           f"Try narrowing the search scope.",
+            }
 
         return {
             "tool_call_id": tool_call.id,
@@ -121,16 +135,73 @@ class Agent:
                 output.append(result)
         return output
 
-    async def llm_request(self) -> dict:
-        """Make an async LLM API call."""
-        messages = (
-            [self._system_prompt]
-            + construct_history(self._base_prompts)
-            + self.messages.messages
-        )
+    def _build_messages_for_llm(self) -> list[dict]:
+        """Build full message list with all memory layers.
+        
+        Order (DeepSeek cache-optimized):
+          system → base_prompts → persistent → compressed → masked → sliding window
+        
+        Critical: every assistant message MUST have non-empty content OR tool_calls.
+        """
+        messages: list[dict] = []
 
-        ctx_len = self.messages.get_context_length()
-        logger.info(f"LLM request: {len(messages)} msgs, ~{ctx_len} chars")
+        # Layer 0: System prompt (static → prefix-cached by DeepSeek)
+        messages.append(self._system_prompt)
+
+        # Layer 1: Base prompts (tool definitions, guidelines — static)
+        if self._base_prompts:
+            messages.extend(construct_history(self._base_prompts))
+
+        # Layer 2: Persistent memory (key facts across sessions)
+        persistent = self.messages._persistent.as_context_string()
+        if persistent:
+            messages.append({
+                "role": "user",
+                "name": "MASTERMIND",
+                "content": persistent,
+            })
+
+        # Layer 3: Compressed history (LLM summaries of old batches)
+        for entry in self.messages._compressed:
+            d = {"role": entry.role, "content": entry.content or ""}
+            if entry.reasoning:
+                d["reasoning_content"] = entry.reasoning
+            if entry.tool_calls:
+                d["tool_calls"] = entry.tool_calls
+            messages.append(d)
+
+        # Layer 4: Masked observations (old tool outputs replaced with [MASKED: ...])
+        for entry in self.messages.masked_entries:
+            d = {"role": entry.role, "content": entry.content}
+            if entry.tool_name:
+                d["name"] = entry.tool_name
+            if entry.tool_call_id:
+                d["tool_call_id"] = entry.tool_call_id
+            if entry.tool_calls:
+                d["tool_calls"] = entry.tool_calls
+            if entry.reasoning:
+                d["reasoning_content"] = entry.reasoning
+            # Safety: ensure assistant messages always have content or tool_calls
+            if entry.role == "assistant" and not d.get("content") and not d.get("tool_calls"):
+                if entry.reasoning:
+                    d["content"] = f"[Thought: {entry.reasoning.split(chr(10))[0][:200]}]"
+                else:
+                    d["content"] = "[No content]"
+            messages.append(d)
+
+        # Layer 5: Sliding window (last N messages in full detail)
+        messages.extend(self.messages.messages)
+
+        return messages
+
+    async def llm_request(self) -> dict:
+        """Make an async LLM API call with layered context."""
+        messages = self._build_messages_for_llm()
+
+        ctx_len = sum(len(m.get("content", "") or "") + len(m.get("reasoning_content", "") or "")
+                      for m in messages)
+        est_tokens = ctx_len // 3
+        logger.info(f"LLM request: {len(messages)} msgs, ~{est_tokens} tokens")
 
         tools = self._registry.get_openai_tools() if self._use_tools else []
 
@@ -152,6 +223,30 @@ class Agent:
         """
         max_iterations = 15
         iteration = 0
+
+        # Add user message to context
+        if initial_user_request:
+            self.messages.append({
+                "role": "user",
+                "name": "User",
+                "content": initial_user_request,
+            })
+
+        # Proactive compression: if context overflowed before LLM call, compress now
+        if self.messages.overflow and self._helper_agent:
+            logger.warning(
+                f"Overflow before LLM request ({self.messages.get_context_length()} tokens) — "
+                "compressing proactively"
+            )
+            try:
+                await asyncio.wait_for(
+                    self.messages.compress(self._helper_agent),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                logger.error("Proactive compression timed out")
+            except Exception as e:
+                logger.error(f"Proactive compression failed: {e}")
 
         while iteration < max_iterations:
             iteration += 1
@@ -177,7 +272,6 @@ class Agent:
                 # Convert dicts to objects for compatibility
                 tool_call_objects = []
                 for tc in tool_calls_raw:
-                    # Create a simple object with .id, .function.name, .function.arguments
                     class ToolCallObj:
                         pass
                     obj = ToolCallObj()
@@ -195,13 +289,23 @@ class Agent:
                 for result in tool_results:
                     self.messages.append(result, save=False)
 
-                # Check if context overflowed
+                # Check if context overflowed — trigger compression
                 if self.messages.overflow and self._helper_agent:
-                    self.messages.compress(self._helper_agent)
+                    try:
+                        await asyncio.wait_for(
+                            self.messages.compress(self._helper_agent),
+                            timeout=60.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.error("Compression timed out after 60s")
+                    except Exception as e:
+                        logger.error(f"Compression failed: {e}")
             else:
                 # Final response — no tool calls
                 content = message.get("content", "")
-                logger.info(f"Agent finished in {iteration} iterations")
+                logger.info(f"Agent finished in {iteration} iterations, "
+                           f"context: {self.messages.length} msgs, "
+                           f"~{self.messages.get_context_length()} tokens")
                 return content
 
         logger.warning(f"Max iterations ({max_iterations}) reached")

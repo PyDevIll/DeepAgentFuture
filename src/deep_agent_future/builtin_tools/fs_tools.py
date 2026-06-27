@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Optional
 
 from loguru import logger
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 _current_dir: Path = Path.cwd()
 
@@ -137,26 +139,91 @@ async def fs_stat(path: str) -> str:
     return '\n'.join(lines)
 
 
-async def fs_grep(pattern: str, path: str = ".", ext: str = "") -> str:
-    """Recursive case-insensitive text search."""
+async def fs_grep(pattern: str, path: str = ".", ext: str = "", max_files: int = 500) -> str:
+    """Recursive case-insensitive text search. Skips binary/large files, limited scope."""
     p = _safe_path(path)
     if not p.exists():
         return f"Path not found: {path}"
+
     pattern_lower = pattern.lower()
-    matches = []
+    matches: list[str] = []
+    files_scanned = 0
+    skipped_binary = 0
+    skipped_large = 0
+    MAX_FILE_SIZE = 1_000_000  # skip files > 1MB
+    MAX_MATCHES = 100
+
+    # Collect files first (fast) then process with limits
+    files_to_search: list[Path] = []
     for fp in p.rglob("*"):
         if fp.is_file():
             if ext and not fp.name.endswith(ext):
                 continue
+            files_to_search.append(fp)
+            if len(files_to_search) >= max_files:
+                break
+
+    # Process files in thread pool (non-blocking)
+    def search_file(fp: Path) -> list[str]:
+        local_matches: list[str] = []
+        try:
+            fsize = fp.stat().st_size
+        except OSError:
+            return local_matches
+
+        if fsize > MAX_FILE_SIZE:
+            return local_matches  # counted by caller
+
+        if _is_binary(str(fp)):
+            return local_matches  # counted by caller
+
+        try:
+            text = fp.read_text(encoding='utf-8', errors='replace')
+        except Exception:
+            return local_matches
+
+        for lineno, line in enumerate(text.split('\n'), 1):
+            if pattern_lower in line.lower():
+                local_matches.append(f"{fp}:{lineno}:{line.rstrip()}")
+                if len(local_matches) >= MAX_MATCHES:
+                    break
+        return local_matches
+
+    loop = asyncio.get_running_loop()
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = []
+        for fp in files_to_search:
+            futures.append(loop.run_in_executor(pool, search_file, fp))
+
+        for i, future in enumerate(asyncio.as_completed(futures)):
             try:
-                for lineno, line in enumerate(fp.read_text(encoding='utf-8', errors='replace').split('\n'), 1):
-                    if pattern_lower in line.lower():
-                        matches.append(f"{fp}:{lineno}:{line.rstrip()}")
+                result = await future
+                matches.extend(result)
             except Exception:
                 pass
+
+    # Count skipped files by checking sizes
+    for fp in files_to_search:
+        try:
+            if fp.stat().st_size > MAX_FILE_SIZE:
+                skipped_large += 1
+            elif _is_binary(str(fp)):
+                skipped_binary += 1
+        except OSError:
+            pass
+
+    skipped_msg = ""
+    if skipped_binary or skipped_large:
+        parts = []
+        if skipped_binary:
+            parts.append(f"{skipped_binary} binary")
+        if skipped_large:
+            parts.append(f"{skipped_large} large (>1MB)")
+        skipped_msg = f" (skipped: {', '.join(parts)} files)"
+
     if not matches:
-        return f"No matches for '{pattern}' in {path}"
-    return '\n'.join(matches[:100])
+        return f"No matches for '{pattern}' in {path}{skipped_msg}"
+    return '\n'.join(matches[:MAX_MATCHES]) + (f"\n\n... truncated to {MAX_MATCHES} matches{skipped_msg}" if len(matches) > MAX_MATCHES else skipped_msg and f"\n{skipped_msg}")
 
 
 async def fs_find(path: str = ".", name: str = "*") -> str:
