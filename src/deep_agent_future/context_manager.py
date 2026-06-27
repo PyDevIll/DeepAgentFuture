@@ -320,6 +320,7 @@ class ContextPool:
     def assign_messages(self, messages: list[dict]) -> None:
         """Bulk load messages (e.g., from last memory)."""
         self._all_entries = [self._dict_to_entry(m) for m in messages]
+        self._clean_orphaned_tools()
 
     def get_chat_history(self, messages: Optional[list[dict]] = None) -> str:
         """Render chat history as markdown string (for compression)."""
@@ -349,6 +350,8 @@ class ContextPool:
     async def compress(self, helper_agent) -> Optional[str]:
         """LLM summarization — last resort for large batches."""
         # Token-based trigger: compress at 80% budget OR 20+ entries
+        self.log_state("BEFORE compression")
+
         est_tokens = self.get_context_length()
         overflow_ratio = est_tokens / self.max_tokens if self.max_tokens > 0 else 0
         enough_entries = len(self._all_entries) >= 20
@@ -407,11 +410,13 @@ class ContextPool:
             time=datetime.now().strftime("%d.%m.%Y, %H:%M"),
             layer=Layer.COMPRESSED,
         )
+        logger.info(f"Compressed entry added: role={comp_entry.role}, content length={len(comp_entry.content)}")
         self._compressed.append(comp_entry)
 
         # Trim old entries: keep only last window_size + append compressed
         kept = self._all_entries[-self.window_size:]
         self._all_entries = kept
+        self._clean_orphaned_tools()
 
         # Save to disk
         comp_file = self._data_dir / "compressed_history.txt"
@@ -428,6 +433,8 @@ class ContextPool:
             f"Compression complete: {len(batch)} turns → summary, "
             f"context now ~{self.get_context_length()} tokens"
         )
+
+        self.log_state("AFTER compression")
         return compressed_text
 
     # ── Crash Recovery ─────────────────────────────────────────────
@@ -439,6 +446,7 @@ class ContextPool:
         try:
             raw = json.loads(save_file.read_text(encoding='utf-8'))
             self._all_entries = [self._dict_to_entry(m) for m in raw]
+            self._clean_orphaned_tools()
             self._check_overflow()
             if self.overflow:
                 logger.warning(
@@ -571,3 +579,38 @@ class ContextPool:
                 f.write(f"{entry.content or ''}\n---\n\n")
         except Exception as e:
             logger.error(f"History save failed: {e}")
+
+
+    def log_state(self, tag: str = "") -> None:
+        logger.info(f"=== Context state {tag} ===")
+        logger.info(f"  Total entries: {len(self._all_entries)}")
+        logger.info(f"  Sliding window (last {self.window_size}): {len(self.sliding_window)} entries")
+        if self.sliding_window:
+            first = self.sliding_window[0]
+            last = self.sliding_window[-1]
+            # Safe preview: handle None content
+            first_preview = (first.content[:50] if first.content else "[No content]")
+            last_preview = (last.content[:50] if last.content else "[No content]")
+            logger.info(f"    first: {first.role} '{first_preview}'")
+            logger.info(f"    last:  {last.role} '{last_preview}'")
+        logger.info(f"  Compressed entries: {len(self._compressed)}")
+        logger.info(f"  Masked entries (old): {len(self.masked_entries)}")
+        logger.info(f"  Persistent facts: {len(self._persistent.facts)}")
+        logger.info(f"  Estimated tokens: {self.get_context_length()}")
+        logger.info(f"  Overflow flag: {self.overflow}")
+        logger.info("=====================================")
+
+
+    def _clean_orphaned_tools(self) -> None:
+        """Remove tool messages that have no matching assistant with tool_calls."""
+        # Collect all valid tool_call_ids from assistant messages
+        valid_ids = set()
+        for entry in self._all_entries:
+            if entry.role == "assistant" and entry.tool_calls:
+                for tc in entry.tool_calls:
+                    valid_ids.add(tc["id"])
+        # Keep only tool messages whose id is in valid_ids
+        self._all_entries = [
+            e for e in self._all_entries
+            if not (e.role == "tool" and e.tool_call_id not in valid_ids)
+        ]

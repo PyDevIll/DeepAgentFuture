@@ -86,18 +86,18 @@ class ToolRegistry:
             })
         return tools
 
-    async def call_tool(self, name: str, **kwargs: Any) -> str:
-        tdef = self._tools.get(name)
+    async def call_tool(self, tool_name: str, **kwargs: Any) -> str:
+        tdef = self._tools.get(tool_name)
         if not tdef:
-            return f"Error: tool '{name}' not found"
+            return f"Error: tool '{tool_name}' not found"
         try:
             result = await tdef.func(**kwargs)
             return str(result)
         except Exception as e:
-            logger.error(f"Tool '{name}' error: {e}")
-            return f"Error executing '{name}': {e}"
+            logger.error(f"Tool '{tool_name}' error: {e}")
+            return f"Error executing '{tool_name}': {e}"
 
-    def reload(self) -> int:
+    def hot_reload(self) -> int:
         reloaded = 0
         package = self._tools_package
         if package not in sys.modules:
@@ -130,8 +130,8 @@ class ToolRegistry:
 
     def list_tools(self) -> str:
         lines = [f"ToolRegistry v{self._version} — {len(self._tools)} tools:"]
-        for name, tdef in sorted(self._tools.items()):
-            lines.append(f"  {name}: {tdef.description[:80]}")
+        for tool_name, tdef in sorted(self._tools.items()):
+            lines.append(f"  {tool_name}: {tdef.description[:80]}")
         return '\n'.join(lines)
 
 

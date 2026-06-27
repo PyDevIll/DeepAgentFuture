@@ -41,6 +41,35 @@ def construct_history(prompts_list: list[tuple[str, Optional[str]]]) -> list[dic
     return composed
 
 
+def validate_message_sequence(messages: list[dict]) -> None:
+    """
+    Check that every tool message has a preceding assistant message
+    with a tool_calls entry that includes its tool_call_id.
+    Raises ValueError with details if invalid.
+    """
+    tool_call_ids = set()
+    for i, msg in enumerate(messages):
+        role = msg.get("role")
+        if role == "assistant" and msg.get("tool_calls"):
+            # Collect all tool_call_ids from this assistant message
+            for tc in msg["tool_calls"]:
+                tool_call_ids.add(tc["id"])
+        elif role == "tool":
+            tc_id = msg.get("tool_call_id")
+            if tc_id not in tool_call_ids:
+                # Check if the immediately preceding message is assistant with this id
+                prev = messages[i-1] if i > 0 else None
+                if prev and prev.get("role") == "assistant" and prev.get("tool_calls"):
+                    # Check if the id exists in its tool_calls
+                    ids_in_prev = {tc["id"] for tc in prev["tool_calls"]}
+                    if tc_id in ids_in_prev:
+                        continue  # valid
+                # If we reach here, it's orphaned
+                raise ValueError(
+                    f"Orphaned tool message at index {i} with tool_call_id={tc_id}. "
+                    f"Preceding message: {prev} (if any)."
+                )
+
 class Agent:
     """Async reasoning agent with hot-reload tools, crash recovery, and layered context."""
 
@@ -143,6 +172,7 @@ class Agent:
         
         Critical: every assistant message MUST have non-empty content OR tool_calls.
         """
+        self.messages.log_state("STATE AT build_messager_for_llm")
         messages: list[dict] = []
 
         # Layer 0: System prompt (static → prefix-cached by DeepSeek)
@@ -192,6 +222,30 @@ class Agent:
         # Layer 5: Sliding window (last N messages in full detail)
         messages.extend(self.messages.messages)
 
+        # ---- DEBUG: log message structure ----
+        logger.debug(f"Built {len(messages)} messages for LLM")
+        for idx, msg in enumerate(messages):
+            role = msg.get("role")
+            content_preview = (msg.get("content") or "")[:100]
+            tool_calls = bool(msg.get("tool_calls"))
+            tc_id = msg.get("tool_call_id", "")
+            logger.debug(
+                f"  [{idx}] role={role}, content='{content_preview}', "
+                f"has_tool_calls={tool_calls}, tool_call_id={tc_id}"
+            )
+        # ---- end debug ----
+
+        # Validate the sequence (optional: can be commented out after fixing)
+        try:
+            validate_message_sequence(messages)
+        except ValueError as e:
+            logger.error(f"Message sequence validation failed: {e}")
+            # Optionally dump full messages to file for inspection
+            import json
+            with open("invalid_messages.json", "w", encoding='utf-8') as f:
+                json.dump(messages, f, indent=2, default=str)
+            raise
+
         return messages
 
     async def llm_request(self) -> dict:
@@ -205,15 +259,37 @@ class Agent:
 
         tools = self._registry.get_openai_tools() if self._use_tools else []
 
-        response = await self._client.chat.completions.create(
-            model=LLM_MODEL,
-            messages=messages,
-            tools=tools or None,
-            stream=False,
-            max_tokens=LLM_MAX_OUTPUT_TOKENS,
-            temperature=1.0,
-        )
-        return response.model_dump()
+        try:
+            response = await self._client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=messages,
+                tools=tools or None,
+                stream=False,
+                max_tokens=LLM_MAX_OUTPUT_TOKENS,
+                temperature=1.0,
+            )
+        except Exception as e:
+            # Log full error with traceback and dump messages to file
+            logger.exception(f"LLM API call failed: {e}")
+            # Dump messages for post-mortem
+            import json
+            with open("failed_messages.json", "w", encoding="utf-8") as f:
+                json.dump(messages, f, indent=2, default=str)
+            raise  # re-raise
+
+        # Validate response structure
+        if response is None:
+            raise ValueError("API returned None response")
+        if not hasattr(response, "choices") or not response.choices:
+            raise ValueError(f"Response missing 'choices': {response}")
+
+        response_dict = response.model_dump()
+        if not response_dict.get("choices"):
+            # The API might have returned an error. Log the full response.
+            logger.error(f"LLM response has no choices: {response_dict}")
+            raise ValueError(f"Invalid LLM response: {response_dict}")
+        return response_dict
+
 
     async def run(self, initial_user_request: str = "", reasoning_callback=None) -> str:
         """
@@ -255,7 +331,20 @@ class Agent:
             if self._registry.version > 0:
                 logger.debug(f"Registry v{self._registry.version}, {len(self._registry.tool_names)} tools ready")
 
-            response = await self.llm_request()
+            try:
+                response = await self.llm_request()
+            except Exception as e:
+                logger.exception(f"LLM request failed at iteration {iteration}")
+                # Log the current messages state
+                self.messages.log_state("FAILED LLM REQUEST")
+                # Optionally dump messages
+                import json
+                with open("failed_context.json", "w", encoding='utf-8') as f:
+                    # You'll need to serialize the messages, maybe using self.messages._all_entries
+                    json.dump([self.messages._entry_to_dict(e) for e in self.messages._all_entries], f, indent=2,
+                              default=str)
+                raise
+
             choice = response["choices"][0]
             message = choice["message"]
 
@@ -316,7 +405,7 @@ class Agent:
         try:
             return await self.run(initial_user_request, reasoning_callback)
         except Exception as e:
-            logger.error(f"Agent crashed: {e}")
+            logger.exception(f"Agent crashed: {e}")  # prints full traceback
             self.messages._emergency_save()
             raise
 

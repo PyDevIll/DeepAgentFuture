@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import sys
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -12,7 +11,12 @@ from agent import Agent, NOW
 from telegram_bot import TelegramBot
 from tool_registry import get_registry
 from builtin_tools import register_all as register_builtin_tools
+import sys
 
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    logger.exception("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = global_exception_handler
 
 async def main() -> None:
     """Start MASTERMIND v2."""
@@ -20,7 +24,7 @@ async def main() -> None:
 
     # Configure logging
     logger.remove()
-    logger.add(sys.stderr, level=os.environ.get("LOG_LEVEL", "INFO"))
+    logger.add(sys.stderr, level="DEBUG") #os.environ.get("LOG_LEVEL", "INFO"))
     logger.add(
         Path(__file__).resolve().parent / "data" / "agent.log",
         rotation="10 MB",
