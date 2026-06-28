@@ -295,7 +295,7 @@ class TelegramBot:
         params = {
             "offset": self._offset,
             "timeout": LONG_POLL_TIMEOUT,
-            "allowed_updates": ["message"],
+            "allowed_updates": ["message", "callback_query", "inline_query", "chosen_inline_result"],
             # Note: Telegram API accepts list; documents come as message type
         }
         result = await self._api_call("getUpdates", params)

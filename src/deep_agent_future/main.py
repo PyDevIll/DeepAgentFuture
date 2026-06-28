@@ -82,15 +82,77 @@ async def main() -> None:
     async def handle_message(msg: dict) -> None:
         """Process incoming text messages through the agent."""
         chat_id = msg["chat"]["id"]
-        text = msg.get("text", "")
 
+        # Build rich message context
+        text = msg.get("text", "") or msg.get("caption", "")
+
+        # Format entities if present
+        entities_str = ""
+        if msg.get("entities"):
+            for ent in msg["entities"]:
+                ent_type = ent["type"]
+                # Extract the entity text from the original text using offset+length
+                entity_text = text[ent["offset"]:ent["offset"]+ent["length"]]
+                ent_desc = f"  • {ent_type}: \"{entity_text}\""
+                if ent.get("url"):
+                    ent_desc += f" → {ent['url']}"
+                if ent.get("user"):
+                    ent_desc += f" → user {ent['user'].get('id')}"
+                entities_str += ent_desc + "\n"
+
+        # Format reply-to info
+        reply_str = ""
+        if msg.get("reply_to_message"):
+            rt = msg["reply_to_message"]
+            reply_from = rt.get("from", {})
+            reply_text = rt.get("text", rt.get("caption", ""))
+            reply_str = f"Reply to: @{reply_from.get('username', '?')} ({reply_from.get('first_name', '')}): \"{reply_text[:200]}\"\n"
+
+        # Format forward info
+        forward_str = ""
+        if msg.get("forward_origin"):
+            fo = msg["forward_origin"]
+            ftype = fo.get("type", "")
+            if ftype == "user":
+                fu = fo.get("sender_user", {})
+                forward_str = f"Forwarded from user: @{fu.get('username', '?')} ({fu.get('first_name', '')})\n"
+            elif ftype == "channel":
+                fc = fo.get("chat", {})
+                forward_str = f"Forwarded from channel: {fc.get('title', '?')}\n"
+            elif ftype == "chat":
+                fc = fo.get("sender_chat", {})
+                forward_str = f"Forwarded from chat: {fc.get('title', '?')}\n"
+
+        # Sender info
+        sender = msg.get("from", {})
+        sender_str = f"From: @{sender.get('username', '?')} ({sender.get('first_name', '')} {sender.get('last_name', '')})\n"
+
+        # Chat info
+        chat_title = msg.get("chat", {}).get("title", str(chat_id))
+
+        # Assemble enhanced request
+        context_parts = [
+            f"Current chat_id: {chat_id}",
+            f"Chat: {chat_title}",
+            sender_str.rstrip(),
+        ]
+        if reply_str:
+            context_parts.append(reply_str.rstrip())
+        if forward_str:
+            context_parts.append(forward_str.rstrip())
+        if entities_str:
+            context_parts.append("Entities:\n" + entities_str.rstrip())
+
+        context_str = "\n".join(context_parts)
+
+        enhanced_request = f"{context_str}\n\nUser request: {text}"
+
+        # ... rest stays the same (reasoning_callback, agent.run_with_crash_recovery, etc.)
         logger.info(f"Message from {chat_id}: {text[:100]}")
 
-        # Reasoning callback — sends thoughts to reasoning chat
         async def reasoning_callback(thought: str) -> None:
             await bot.send_reasoning(thought)
 
-        enhanced_request = f"Current chat_id: {chat_id}\n\nUser request: {text}"
         response = await agent.run_with_crash_recovery(
             initial_user_request=enhanced_request,
             reasoning_callback=reasoning_callback,
