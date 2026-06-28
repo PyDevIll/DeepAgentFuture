@@ -13,7 +13,8 @@ from openai import AsyncOpenAI
 from loguru import logger
 
 from context_manager import ContextPool
-from tool_registry import get_registry   # <-- always fetch live
+# from tool_registry import get_registry   # <-- always fetch live
+from deep_agent_future.tool_registry import get_registry
 
 LLM_MAX_OUTPUT_TOKENS = 30000
 LLM_MODEL = "deepseek-v4-flash"  # thinking mode enabled

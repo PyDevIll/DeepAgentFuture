@@ -116,6 +116,91 @@ async def exec_shell(command: str, timeout: int = 30) -> str:
         }, ensure_ascii=False)
 
 
+async def aider_run(
+    instruction: str,
+    files: str = "",
+    model: str = "deepseek/deepseek-v4-flash",
+    read_only_files: str = "",
+    timeout: int = 120,
+) -> str:
+    """Run Aider AI coding assistant on specified files with given instruction.
+
+    Aider is an AI pair programming tool that can edit multiple files,
+    create new files, and make code changes autonomously.
+
+    Args:
+        instruction: The task description for Aider (what to do)
+        files: Comma-separated list of file paths to edit
+        model: Model name (default: deepseek/deepseek-v4-flash)
+        read_only_files: Comma-separated list of read-only context files
+        timeout: Execution timeout in seconds (default: 120)
+
+    Returns:
+        JSON string with stdout, stderr, and exit code
+    """
+    import subprocess
+    import tempfile
+    import os
+
+    # Write instruction to temp file (avoids Windows quoting hell)
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, encoding='utf-8')
+    tmp.write(instruction)
+    tmp_path = tmp.name
+    tmp.close()
+
+    try:
+        # Build command
+        venv_aider = os.path.join(os.path.dirname(sys.executable), 'aider.exe')
+        if not os.path.exists(venv_aider):
+            venv_aider = 'aider'
+
+        cmd = [
+            venv_aider,
+            '--model', model,
+            '--message-file', tmp_path,
+            '--yes',
+            '--no-stream',
+            '--no-git',
+            '--no-show-model-warnings',
+        ]
+
+        if files and files.strip():
+            for f in [x.strip() for x in files.split(',') if x.strip()]:
+                cmd.extend(['--file', f])
+
+        if read_only_files and read_only_files.strip():
+            for f in [x.strip() for x in read_only_files.split(',') if x.strip()]:
+                cmd.extend(['--read', f])
+
+        logger.debug(f"Running Aider: {' '.join(cmd)}")
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+
+        result = {
+            "stdout": stdout.decode('utf-8', errors='replace'),
+            "stderr": stderr.decode('utf-8', errors='replace'),
+            "returncode": proc.returncode,
+        }
+
+        return json.dumps(result, ensure_ascii=False)
+
+    except asyncio.TimeoutError:
+        return json.dumps({"error": f"Aider timed out after {timeout}s"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except:
+            pass
+
+
 TOOL_DEFINITIONS = [
     ("ping", ping, "Simple ping/pong health check. Returns pong with current timestamp.", {
         "type": "object",
@@ -153,6 +238,17 @@ TOOL_DEFINITIONS = [
             }
         },
         "required": ["command"],
+    }),
+    ("aider_run", aider_run, "Run Aider AI coding assistant to edit/create files. Pass instruction + comma-separated file paths.", {
+        "type": "object",
+        "properties": {
+            "instruction": {"type": "string", "description": "Task description for Aider (what code changes to make)"},
+            "files": {"type": "string", "description": "Comma-separated file paths to edit (e.g., 'builtin_tools/fs_tools.py')"},
+            "model": {"type": "string", "description": "Model name (default: deepseek/deepseek-v4-flash)"},
+            "read_only_files": {"type": "string", "description": "Comma-separated read-only context file paths"},
+            "timeout": {"type": "integer", "description": "Execution timeout in seconds (default: 120)"},
+        },
+        "required": ["instruction", "files"],
     }),
 ]
 
