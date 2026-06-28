@@ -112,6 +112,9 @@ class Agent:
     async def _execute_single_tool(self, tool_call, user_request: str = "") -> dict:
         """Execute one tool call and return the result message."""
         func_name = tool_call.function.name
+        logger.debug(f"_execute_single_tool: '{func_name}' | registry v{self._registry._version} | tools: {len(self._registry._tools)}")
+        if func_name not in self._registry._tools:
+            logger.error(f"_execute_single_tool: '{func_name}' NOT in registry._tools! Available: {sorted(self._registry._tools.keys())}")
         try:
             args = json.loads(tool_call.function.arguments)
         except json.JSONDecodeError as e:
@@ -258,6 +261,8 @@ class Agent:
         logger.info(f"LLM request: {len(messages)} msgs, ~{est_tokens} tokens")
 
         tools = self._registry.get_openai_tools() if self._use_tools else []
+        if tools:
+            logger.debug(f"llm_request: passing {len(tools)} tools to API: {[t['function']['name'] for t in tools]}")
 
         try:
             response = await self._client.chat.completions.create(
@@ -297,7 +302,7 @@ class Agent:
         Returns final response text.
         reasoning_callback: async callable(thought_text) for live reasoning output.
         """
-        max_iterations = 15
+        max_iterations = 7
         iteration = 0
 
         # Add user message to context

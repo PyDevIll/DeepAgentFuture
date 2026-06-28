@@ -84,7 +84,7 @@ class ToolRegistry:
             name=name, description=description,
             func=func, parameters=parameters or {}, module_name=module_name,
         )
-        self._version += 1
+        logger.debug(f"REGISTER [{name}] from {module_name} — total: {len(self._tools)}")
 
 
     def get_tool(self, name: str) -> Optional[ToolDef]:
@@ -93,19 +93,26 @@ class ToolRegistry:
 
     def get_openai_tools(self) -> list[dict]:
         tools = []
+        names = []
         for tdef in self._tools.values():
+            names.append(tdef.name)
             tools.append({
                 "type": "function",
                 "function": {
                     "name": tdef.name,
                     "description": tdef.description,
                     "parameters": tdef.parameters,
-                },
+                }
             })
+        logger.debug(f"get_openai_tools → {len(tools)} tools: {sorted(names)}")
         return tools
-
-
     async def call_tool(self, tool_name: str, **kwargs: Any) -> str:
+        logger.debug(f"call_tool lookup: '{tool_name}' in registry v{self._version} ({len(self._tools)} tools)")
+        tdef = self._tools.get(tool_name)
+        if not tdef:
+            logger.error(f"call_tool: '{tool_name}' NOT FOUND. Available: {sorted(self._tools.keys())}")
+            return f"Error: tool '{tool_name}' not found"
+        logger.debug(f"call_tool: FOUND '{tool_name}' from module '{tdef.module_name}'")
         tdef = self._tools.get(tool_name)
         if not tdef:
             return f"Error: tool '{tool_name}' not found"
@@ -148,9 +155,17 @@ class ToolRegistry:
         # Critical: re-register all tools after module reloads
         try:
             from deep_agent_future.builtin_tools import register_all
+            old_count = len(self._tools)
+            old_names = sorted(self._tools.keys())
             register_all(self)
-            logger.info(f"Registry reloaded: {reloaded} modules, {len(self._tools)} tools re-registered")
+            new_count = len(self._tools)
+            new_names = sorted(self._tools.keys())
+            added = set(new_names) - set(old_names)
+            if added:
+                logger.info(f"hot_reload: +{len(added)} new tools: {sorted(added)}")
+            logger.info(f"Registry reloaded: {reloaded} modules, {old_count}→{new_count} tools")
         except ImportError as e:
+            logger.error(f"Failed to import register_all: {e}")
             logger.error(f"Failed to import register_all: {e}")
         self._version += 1
         return reloaded
