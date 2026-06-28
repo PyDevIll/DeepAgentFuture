@@ -29,27 +29,29 @@
 - `git_add` — Add file contents to the index
 - `git_commit` — Record changes to the repository
 - `git_log` — Show last N commit logs (oneline format)
-- `git_diff` — Show changes (--stat format)
+- `git_diff` — Show changes (unified diff format). Use `staged=True` for `--cached`
 - `git_branch` — List branches
 - `git_checkout` — Switch branches
+- `git_push` — Push commits to remote repository
 
 ### Advanced File Editing (`fs_a*`, `fs_w*`, `fs_apply_patch`, `fs_edit_blocks`)
 - `fs_aedit` — Advanced file editing with layered matching (exact→whitespace→fuzzy)
 - `fs_apply_patch` — Apply unified diff patch to a file
 - `fs_write_file` — Write complete file content (whole-file rewrite)
 - `fs_edit_blocks` — Apply multiple SEARCH/REPLACE edit blocks at once
-
 ### Telegram (`telegram_*`)
 - `telegram_send_file` — Send file from filesystem to Telegram chat by absolute path
 - `telegram_download_file` — Download file from Telegram to filesystem using file_id
+- `telegram_send_voice` — Generate TTS (Google) and send as voice message to Telegram chat. Russian by default
 
-### Meta
-- `reload_tools` — Hot-reload all builtin tool modules without restarting
+### Text-to-Speech (`tts_*`)
+- `tts_generate` — Generate speech audio (MP3) from text using Google Translate TTS. FREE, no API key needed. Max 200 chars. Supports 50+ languages
 
 ### Voice Recognition — Groq Whisper (`groq_*`)
-- `groq_transcribe` — Transcribe audio file via Groq's FREE Whisper API (whisper-large-v3). 50+ languages. Requires `GROQ_API_KEY` env var + `pip install groq`
+- `groq_transcribe` — Transcribe audio file via Groq's FREE Whisper API (whisper-large-v3). 50+ languages. Requires `GROQ_API_KEY` env var
 - `groq_transcribe_telegram` — Download Telegram voice message by file_id then transcribe via Groq Whisper — one combined call
 
+### Meta
 ## **Tool Execution**
 - Tools are async — multiple independent calls run in parallel.
 - Each tool returns a string result.
