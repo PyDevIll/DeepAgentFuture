@@ -28,10 +28,10 @@ except ImportError:
 
 DEFAULT_DOWNLOADS = Path(__file__).resolve().parent.parent / "data" / "downloads"
 
-# Extensions accepted by Groq Whisper API (2025-06-28)
+# Extensions accepted by Groq Whisper API (as of 2025-06-28)
 _GROQ_ALLOWED_EXT = {
     ".flac", ".mp3", ".mp4", ".mpeg", ".mpga",
-    ".m4a", ".oga", ".ogg", ".opus", ".wav", ".webm",
+    ".m4a", ".ogg", ".opus", ".wav", ".webm",
 }
 
 # ---------------------------------------------------------------------------
@@ -39,10 +39,7 @@ _GROQ_ALLOWED_EXT = {
 # ---------------------------------------------------------------------------
 
 def _convert_audio_to_mp3(source: Path) -> Path | None:
-    """Convert any audio to mono 16kHz MP3 via ffmpeg.  Returns path or None.
-
-    The resulting file is placed next to the source as ``<name>.mp3``.
-    """
+    """Convert any audio to mono 16kHz MP3 via ffmpeg. Returns path or None."""
     output = source.with_suffix(".mp3")
     try:
         result = subprocess.run(
@@ -80,7 +77,7 @@ def _convert_audio_to_mp3(source: Path) -> Path | None:
 async def _get_client(proxy: str = "") -> AsyncGroq | None:
     """Return configured AsyncGroq client or None."""
     if not HAS_GROQ:
-        logger.error("groq package not installed.  pip install groq")
+        logger.error("groq package not installed. Run: pip install groq")
         return None
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
@@ -103,32 +100,26 @@ async def groq_transcribe(
     prompt: str = "",
     proxy: str = "socks5://127.0.0.1:1080",
 ) -> dict[str, Any]:
-    """Transcribe an audio file using Groq Whisper (whisper-large-v3).
-
-    If the file format is not in Groq's allowlist the function attempts an
-    automatic ffmpeg conversion to mp3.
-
-    Args:
-        audio_path: Absolute path to the audio file.
-        language: ISO language code (zh, en, ja, ko, …).  Default zh.
-        prompt: Optional context prompt to guide transcription style.
-        proxy: Optional proxy URL (e.g. socks5://127.0.0.1:1080).
-
-    Returns:
-        dict: {"ok": True, "text": "…"} or {"ok": False, "error": "…"}
-    """
+    """Transcribe an audio file using Groq Whisper (whisper-large-v3)."""
     path = Path(audio_path)
     if not path.exists():
         return {"ok": False, "error": f"File not found: {audio_path}"}
     if not path.is_file():
         return {"ok": False, "error": f"Not a file: {audio_path}"}
 
+    # --- FIX: rename .oga -> .ogg (Groq accepts .ogg but not .oga) ---
+    if path.suffix.lower() == ".oga":
+        new_path = path.with_suffix(".ogg")
+        path.rename(new_path)
+        path = new_path
+        logger.info(f"Renamed .oga → .ogg: {path}")
+
     # ── format check + auto-convert if needed ──────────────────────────
     converted_path: Path | None = None
     if path.suffix.lower() not in _GROQ_ALLOWED_EXT:
         logger.warning(
             f"Unsupported format '{path.suffix}' — Groq accepts: "
-            f"{', '.join(sorted(_GROQ_ALLOWED_EXT))}.  Converting via ffmpeg…"
+            f"{', '.join(sorted(_GROQ_ALLOWED_EXT))}. Converting via ffmpeg…"
         )
         converted_path = _convert_audio_to_mp3(path)
         if converted_path is None:
@@ -199,12 +190,12 @@ async def groq_transcribe_telegram(
 ) -> dict[str, Any]:
     """Download a Telegram voice message and transcribe it via Groq Whisper.
 
-    Requires telegram_tools infrastructure for download.  Format conversion
+    Requires telegram_tools infrastructure for download. Format conversion
     is handled automatically by ``groq_transcribe``.
 
     Args:
         file_id: Telegram file_id of the voice message.
-        language: ISO language code (zh, en, ja, ko, …).  Default zh.
+        language: ISO language code (zh, en, ja, ko, …). Default zh.
         prompt: Optional context prompt.
         proxy: Optional proxy URL.
         destination_dir: Directory to save the downloaded audio file.
@@ -228,11 +219,12 @@ async def groq_transcribe_telegram(
             "details": dl_result,
         }
 
-    audio_path = dl_result.get("result", {}).get("local_path", "")
+    # telegram_download_file returns the path under the key "path"
+    audio_path = dl_result.get("path", "")
     if not audio_path:
         return {
             "ok": False,
-            "error": "Download succeeded but no local_path returned",
+            "error": "Download succeeded but no path returned",
             "details": dl_result,
         }
 
@@ -244,12 +236,15 @@ async def groq_transcribe_telegram(
         audio_path = str(new_path)
         logger.info(f"Renamed .oga → .ogg: {new_path}")
 
+    # ─── FIX: single call, no duplicate ───────────────────────────────
     transcribe_result = await groq_transcribe(
         audio_path=audio_path,
         language=language,
         prompt=prompt,
         proxy=proxy,
     )
+
+    # Add the audio path to the result for reference
     transcribe_result["audio_path"] = audio_path
     return transcribe_result
 
@@ -335,3 +330,4 @@ def register_all(registry) -> None:
     """Register every tool defined in this module onto *registry*."""
     for name, func, desc, params in TOOL_DEFINITIONS:
         registry.register_function(func, name, desc, params)
+    logger.info(f"Registered {len(TOOL_DEFINITIONS)} Groq Whisper tools")
