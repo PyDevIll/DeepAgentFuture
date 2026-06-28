@@ -20,4 +20,15 @@ venv/
 # Data files
 *.log
 data/message_history.md
+data/downloads/
+data/tts_cache/
+data/last_compression.txt
+data/emergency_save.json
+data/compressed_history.txt
+src/deep_agent_future/data/message_history.md
+src/deep_agent_future/data/downloads/
+src/deep_agent_future/data/tts_cache/
+src/deep_agent_future/data/last_compression.txt
+src/deep_agent_future/data/emergency_save.json
+src/deep_agent_future/data/compressed_history.txt
 .aider*
