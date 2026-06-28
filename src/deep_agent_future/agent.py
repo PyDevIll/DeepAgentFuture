@@ -16,7 +16,7 @@ from context_manager import ContextPool
 from tool_registry import ToolRegistry, get_registry
 
 LLM_MAX_OUTPUT_TOKENS = 30000
-LLM_MODEL = "deepseek-v4-pro"  # thinking mode enabled
+LLM_MODEL = "deepseek-v4-flash"  # thinking mode enabled
 
 
 def construct_history(prompts_list: list[tuple[str, Optional[str]]]) -> list[dict]:

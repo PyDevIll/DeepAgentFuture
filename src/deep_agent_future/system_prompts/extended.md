@@ -77,89 +77,94 @@ ToolRegistry.execute(tool_name, params)
 
 ### Step-by-step procedure
 
-**1. Choose the right module.** If the new tool belongs to an existing domain, add to that module. Otherwise create a new file in `builtin_tools/`.
+**1. Choose the right module.** If the new tool belongs to an existing domain, add to that module (e.g., `fs_tools.py`, `git_tools.py`, `telegram_tools.py`). Otherwise create a new file in `builtin_tools/`.
 
-**2. Write the async tool function.** Every tool is an `async def` that takes keyword arguments matching the declared JSON schema parameters. Return a dict: `{"ok": True, "result": ...}` or `{"ok": False, "error": "..."}`.
+**2. Write the async tool function.** Every tool must be `async def` with keyword arguments matching the declared JSON Schema parameters.
 
 Example:
 ```python
-async def my_new_tool(param1: str, param2: int = 10) -> dict:
-    """Short docstring — becomes part of the tool description."""
-    try:
-        result = await do_something(param1, param2)
-        return {"ok": True, "result": result}
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
+from loguru import logger
+
+async def my_new_tool(param1: str, param2: int = 10) -> str:
+    """Short description — becomes part of the tool description."""
+    # Implementation
+    result = f"Processed {param1} with count {param2}"
+    logger.debug(f"my_new_tool: {result}")
+    return result
 ```
 
-**3. Define the JSON Schema.** Add a `TOOL_DEFINITION` or extend the module's existing `TOOL_DEFINITIONS` list/dict. Every definition must have:
-- `name`: unique function name (string)
-- `description`: what the tool does, when to use it (string)
-- `parameters`: JSON Schema object with `type: "object"`, `properties`, `required`
+NOTE: Unlike legacy tools, new tools return **plain values** (str, dict, etc.) rather than `{"ok": True/Fail, "result": ...}` wrappers. The agent framework handles errors.
 
-Example:
+**3. Define TOOL_DEFINITIONS** — a module-level list of tuples, placed at the BOTTOM of the file:
+
 ```python
-MY_NEW_TOOL_DEF = {
-    "name": "my_new_tool",
-    "description": "Does something useful with param1 and param2. Use when...",
-    "parameters": {
+TOOL_DEFINITIONS = [
+    ("my_new_tool", my_new_tool, "Does something useful with param1 and param2", {
         "type": "object",
         "properties": {
-            "param1": {"type": "string", "description": "Primary parameter"},
-            "param2": {"type": "integer", "description": "Optional count (default 10)"},
+            "param1": {"type": "string", "description": "Primary input parameter"},
+            "param2": {"type": "integer", "description": "Optional count (default: 10)"},
         },
-        "required": ["param1"],
-    },
-}
+        "required": ["param1"],   # DO NOT include params with defaults
+    }),
+]
 ```
 
-**4. Register the tool in the module's `register_all(registry)` function.** Every tool module has a `register_all(registry: ToolRegistry)` function. Add:
+**Rules for JSON Schema**:
+- Map Python types → JSON types: `str`→`string`, `int`→`integer`, `float`→`number`, `bool`→`boolean`, `list`→`array`, `dict`→`object`.
+- If a parameter has a **default value** in the function signature, do NOT include it in `required`.
+- If a parameter has **no default**, it MUST be in `required`.
+- Every property must have a clear `description`.
+
+**4. Implement `register_all(registry)`** at the bottom of the file:
+
 ```python
-registry.register(
-    func=my_new_tool,
-    name=MY_NEW_TOOL_DEF["name"],
-    description=MY_NEW_TOOL_DEF["description"],
-    parameters=MY_NEW_TOOL_DEF["parameters"],
-)
+def register_all(registry):
+    """Register all tools from this module with the given registry."""
+    for name, func, desc, params in TOOL_DEFINITIONS:
+        registry.register_function(func, name, desc, params)
+    logger.info(f"Registered {len(TOOL_DEFINITIONS)} my_new_tool(s)")
 ```
 
-**5. If creating a NEW module file, also:**
-- Create the file in `builtin_tools/` (e.g., `builtin_tools/my_new_tools.py`)
-- Add the `register_all(registry)` function
-- Import and call `register_all` in `builtin_tools/__init__.py`:
-  ```python
-  from .my_new_tools import register_all as register_my_new_tools
-  ```
-  Then inside `register_builtin_tools()`:
-  ```python
-  register_my_new_tools(registry)
-  ```
+**5. If creating a NEW module file, register it in `builtin_tools/__init__.py`**:
 
-**6. Hot-reload.** Call `reload_tools` (or the agent calls it) to re-import all modules and re-register. The registry's `hot_reload()` method:
-   - Reloads every `builtin_tools.*` module via `importlib.reload()`
-   - Calls `register_all()` on each reloaded module
-   - Returns the new tool count
+Add your module to the import line and call its `register_all`:
+```python
+def register_all(registry):
+    from . import fs_tools, search_tools, git_tools, tavily_tools, meta_tools, edit_tools, telegram_tools, groq_whisper_tools, tts_tools, my_new_tools
+    fs_tools.register_all(registry)
+    ...
+    my_new_tools.register_all(registry)
+    logger.info("All builtin tools registered")
+```
 
-**7. Update this file.** Add the new tool to the CAPABILITIES list below.
+**6. Restart or hot-reload.** Restart the application, or call `reload_tools` if already running. The `hot_reload()` mechanism reloads all `builtin_tools.*` modules via `importlib.reload()` and then calls `register_all()` on each.
+
+**7. Update this file.** Add the new tool to the CAPABILITIES section below.
 
 ### Critical rules for tool functions
 - **ASYNC ONLY**: All tool functions must be `async def`. The registry awaits them.
-- **Return dict**: Always `{"ok": True/False, "result": ..., "error": ...}`. The `result` field is what the LLM sees. The `error` field is shown only when `ok=False`.
-- **No side-effects in description**: The `description` field is injected into the system prompt. Make it clear enough for the LLM to decide when to call this tool.
-- **Schema parameters match function signature**: The JSON Schema `properties` keys must match the function's parameter names exactly.
-- **Defaults**: If a parameter has a default in the function signature, do NOT include it in the `required` array of the schema.
+- **Return plain values**: Return strings, dicts, etc. The framework wraps results.
+- **Docstrings matter**: The function docstring becomes part of the tool description shown to the LLM.
+- **Schema matches signature**: JSON Schema property keys must exactly match function parameter names.
+- **Defaults = not required**: Parameters with defaults MUST be omitted from the `required` array.
 
 ### Registration API reference
 ```python
-ToolRegistry.register(
-    func: Callable,        # async function
-    name: str,             # unique tool name (used in tool_calls)
-    description: str,      # injected into system prompt
-    parameters: dict,      # JSON Schema parameters object
-)
-```
+# Direct registration (used by register_all patterns):
+ToolRegistry.register_function(func, name, description, parameters)
 
----
+# Decorator-based registration (alternative):
+@registry.register(name="tool_name", description="...", parameters={...})
+async def my_tool(...): ...
+
+# Hot-reload:
+ToolRegistry.hot_reload()  # Reloads all modules + calls register_all()
+
+# Query:
+ToolRegistry.get_openai_tools()  # Returns list in OpenAI function-calling format
+ToolRegistry.list_tools()        # Returns dict of {name: description}
+```
 
 ## **CAPABILITIES**
 - **File System**: Full read/write/navigate via fs_tools. Tree view, search, edit, append.
@@ -169,7 +174,7 @@ ToolRegistry.register(
 - **Memory**: Context compression (4-layer: scratchpad→sliding→masked→compressed), crash recovery, emergency saves every 5 messages.
 - **Telegram**: Responds to each incoming message. Reasoning output to separate chat. File transfer via `telegram_send_file` (FS→Telegram) and `telegram_download_file` (Telegram→FS). Incoming documents/photos auto-download to `data/downloads/`.
 - **Voice**: Groq Whisper transcription (50+ languages), Google TTS voice generation, Telegram voice message send/receive.
-- **Git**: Full git workflow — init, status, add, commit, log, diff, branch, checkout.
+- **Git**: Full git workflow — init, status, add, commit, log, diff, branch, checkout, push.
 
 ## **RULES**
 - **Async-first**: All tool calls parallel where possible.

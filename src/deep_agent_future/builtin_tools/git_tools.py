@@ -28,50 +28,58 @@ async def _run_git(path: str, *args: str, timeout: int = 30) -> str:
         return result.strip() or "(no output)"
     except asyncio.TimeoutError:
         return f"Git command timed out ({timeout}s)"
-    except FileNotFoundError:
-        return "Error: git not found in PATH"
-    except Exception as e:
-        return f"Git error: {e}"
 
 
 async def git_init(path: str = ".") -> str:
-    """Initialize a git repository."""
-    return await _run_git(path, 'init')
+    """Initialize a git repository at the given path."""
+    return await _run_git(path, "init")
 
 
 async def git_status(path: str = ".") -> str:
     """Show working tree status."""
-    return await _run_git(path, 'status', '--short')
+    return await _run_git(path, "status", "--short")
 
 
 async def git_add(path: str = ".", files: str = ".") -> str:
     """Add file contents to the index."""
-    return await _run_git(path, 'add', files)
+    return await _run_git(path, "add", files)
 
 
-async def git_commit(path: str = ".", message: str = "commit") -> str:
+async def git_commit(path: str = ".", message: str = "") -> str:
     """Record changes to the repository."""
-    return await _run_git(path, 'commit', '-m', message)
+    return await _run_git(path, "commit", "-m", message)
 
 
 async def git_log(path: str = ".", count: int = 10) -> str:
-    """Show last N commit logs."""
-    return await _run_git(path, 'log', f'-{count}', '--oneline')
+    """Show last N commit logs (oneline format)."""
+    return await _run_git(path, "log", f"-{count}", "--oneline")
 
 
-async def git_diff(path: str = ".") -> str:
-    """Show changes between commits, commit and working tree, etc."""
-    return await _run_git(path, 'diff', '--stat')
+async def git_diff(path: str = ".", staged: bool = False) -> str:
+    """Show changes (unified diff format). Use staged=True for --cached."""
+    args = ["diff", "--cached" if staged else None]
+    args = [a for a in args if a]  # filter None
+    return await _run_git(path, *args)
 
 
 async def git_branch(path: str = ".") -> str:
     """List branches."""
-    return await _run_git(path, 'branch', '-a')
+    return await _run_git(path, "branch")
 
 
 async def git_checkout(path: str = ".", branch: str = "main") -> str:
     """Switch branches."""
-    return await _run_git(path, 'checkout', branch)
+    return await _run_git(path, "checkout", branch)
+
+
+async def git_push(path: str = ".", remote: str = "origin", branch: str = "", force: bool = False) -> str:
+    """Push commits to remote repository."""
+    args = ["push", remote]
+    if force:
+        args.append("--force")
+    if branch:
+        args.append(branch)
+    return await _run_git(path, *args)
 
 
 TOOL_DEFINITIONS = [
@@ -109,10 +117,11 @@ TOOL_DEFINITIONS = [
             "count": {"type": "integer", "description": "Number of commits (default: 10)"},
         },
     }),
-    ("git_diff", git_diff, "Show changes (--stat format)", {
+    ("git_diff", git_diff, "Show changes (unified diff format). Use staged=True for --cached", {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Repository path (default: .)"},
+            "staged": {"type": "boolean", "description": "Show staged changes (--cached) (default: false)"},
         },
     }),
     ("git_branch", git_branch, "List branches", {
@@ -128,6 +137,15 @@ TOOL_DEFINITIONS = [
             "branch": {"type": "string", "description": "Branch name (default: main)"},
         },
         "required": ["branch"],
+    }),
+    ("git_push", git_push, "Push commits to remote repository", {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Repository path (default: .)"},
+            "remote": {"type": "string", "description": "Remote name (default: origin)"},
+            "branch": {"type": "string", "description": "Branch name (default: current)"},
+            "force": {"type": "boolean", "description": "Force push (default: false)"},
+        },
     }),
 ]
 
