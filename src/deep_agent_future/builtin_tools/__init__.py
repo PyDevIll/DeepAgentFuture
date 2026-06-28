@@ -4,8 +4,7 @@ from loguru import logger
 
 
 def register_all(registry):
-    """Register all builtin tool modules with the given registry."""
-    from . import fs_tools, search_tools, git_tools, tavily_tools, meta_tools, edit_tools, telegram_tools
+    from . import fs_tools, search_tools, git_tools, tavily_tools, meta_tools, edit_tools, telegram_tools, groq_whisper_tools, tts_tools
     fs_tools.register_all(registry)
     search_tools.register_all(registry)
     git_tools.register_all(registry)
@@ -13,4 +12,6 @@ def register_all(registry):
     meta_tools.register_all(registry)
     edit_tools.register_all(registry)
     telegram_tools.register_all(registry)
+    groq_whisper_tools.register_all(registry)
+    tts_tools.register_all(registry)
     logger.info("All builtin tools registered")

@@ -46,6 +46,10 @@
 ### Meta
 - `reload_tools` — Hot-reload all builtin tool modules without restarting
 
+### Voice Recognition — Groq Whisper (`groq_*`)
+- `groq_transcribe` — Transcribe audio file via Groq's FREE Whisper API (whisper-large-v3). 50+ languages. Requires `GROQ_API_KEY` env var + `pip install groq`
+- `groq_transcribe_telegram` — Download Telegram voice message by file_id then transcribe via Groq Whisper — one combined call
+
 ## **Tool Execution**
 - Tools are async — multiple independent calls run in parallel.
 - Each tool returns a string result.

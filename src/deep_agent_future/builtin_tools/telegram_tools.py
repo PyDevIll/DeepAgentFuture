@@ -1,8 +1,10 @@
-"""Telegram file transfer tools for MASTERMIND v2.
+"""Telegram file transfer + voice tools for MASTERMIND v2.
 
 Provides agent-accessible tools for:
 - Sending files from the filesystem to Telegram chats
 - Downloading files from Telegram chats to the filesystem
+- Generating TTS audio via Google Translate (FREE)
+- Sending voice messages to Telegram chats
 """
 
 from __future__ import annotations

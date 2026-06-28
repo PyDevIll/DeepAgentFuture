@@ -86,43 +86,9 @@ async def main() -> None:
     DOWNLOADS_DIR = Path(__file__).resolve().parent / "data" / "downloads"
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-    async def handle_file(msg: dict) -> None:
-        """Auto-download incoming documents/photos."""
-        chat_id = msg["chat"]["id"]
-        doc = msg.get("document")
-        photo = msg.get("photo")
-
-        if doc:
-            file_id = doc["file_id"]
-            file_name = doc.get("file_name", file_id)
-            logger.info(f"Document from {chat_id}: {file_name} ({doc.get('file_size', 0)} bytes)")
-            result = await bot.download_file(file_id, str(DOWNLOADS_DIR))
-            if result.get("ok"):
-                await bot.send_message(
-                    chat_id,
-                    f"📥 Downloaded: `{result['file_name']}` ({result['file_size']} bytes)",
-                )
-            else:
-                await bot.send_message(chat_id, f"❌ Failed: {result.get('error')}")
-
-        elif photo:
-            # Get largest photo size
-            largest = max(photo, key=lambda p: p.get("file_size", 0))
-            file_id = largest["file_id"]
-            logger.info(f"Photo from {chat_id}: {largest.get('file_size', 0)} bytes")
-            result = await bot.download_file(file_id, str(DOWNLOADS_DIR))
-            if result.get("ok"):
-                await bot.send_message(
-                    chat_id,
-                    f"📥 Downloaded photo: `{result['file_name']}` ({result['file_size']} bytes)",
-                )
-            else:
-                await bot.send_message(chat_id, f"❌ Failed: {result.get('error')}")
-
-    bot.set_file_handler(handle_file)
-
-    # Message handler
+    # Message handler — defined first so handle_file can delegate to it
     async def handle_message(msg: dict) -> None:
+        """Process incoming text messages through the agent."""
         chat_id = msg["chat"]["id"]
         text = msg.get("text", "")
 
@@ -140,6 +106,77 @@ async def main() -> None:
 
         if response:
             await bot.send_reply(chat_id, response)
+
+    async def handle_file(msg: dict) -> None:
+        """Download incoming documents/photos/voice and route to processing."""
+        chat_id = msg["chat"]["id"]
+        doc = msg.get("document")
+        photo = msg.get("photo")
+        voice = msg.get("voice")
+
+        if doc:
+            file_id = doc["file_id"]
+            file_name = doc.get("file_name", file_id)
+            logger.info(f"Document from {chat_id}: {file_name} ({doc.get('file_size', 0)} bytes)")
+            result = await bot.download_file(file_id, str(DOWNLOADS_DIR))
+            if result.get("ok"):
+                await bot.send_message(
+                    chat_id,
+                    f"📥 Downloaded: `{result['file_name']}` ({result['file_size']} bytes)",
+                )
+            else:
+                await bot.send_message(chat_id, f"❌ Failed: {result.get('error')}")
+
+        if photo:
+            # Get largest photo size
+            largest = max(photo, key=lambda p: p.get("file_size", 0))
+            file_id = largest["file_id"]
+            logger.info(f"Photo from {chat_id}: {largest.get('file_size', 0)} bytes")
+            result = await bot.download_file(file_id, str(DOWNLOADS_DIR))
+            if result.get("ok"):
+                await bot.send_message(
+                    chat_id,
+                    f"📥 Downloaded photo: `{result['file_name']}` ({result['file_size']} bytes)",
+                )
+            else:
+                await bot.send_message(chat_id, f"❌ Failed: {result.get('error')}")
+
+        if voice:
+            file_id = voice["file_id"]
+            duration = voice.get("duration", 0)
+            logger.info(f"Voice message from {chat_id}: {duration}s")
+
+            # Download the voice file
+            result = await bot.download_file(file_id, str(DOWNLOADS_DIR))
+            if not result.get("ok"):
+                await bot.send_message(chat_id, f"❌ Voice download failed: {result.get('error')}")
+                return
+
+            audio_path = result["path"]
+            logger.info(f"Voice saved to {audio_path}, transcribing...")
+
+            # Transcribe via Groq Whisper
+            from builtin_tools.groq_whisper_tools import groq_transcribe
+            transcript_result = await groq_transcribe(
+                audio_path,
+                language="ru",  # Russian by default; Groq auto-detects well
+            )
+
+            if not transcript_result.get("ok"):
+                await bot.send_message(
+                    chat_id,
+                    f"❌ Transcription failed: {transcript_result.get('error')}",
+                )
+                return
+
+            transcript = transcript_result["text"]
+            logger.info(f"Transcribed voice ({duration}s): {transcript[:100]}")
+
+            # Route transcribed text to the agent via handle_message
+            msg["text"] = transcript
+            await handle_message(msg)
+
+    bot.set_file_handler(handle_file)
 
     # Start polling
     logger.info("Starting Telegram polling...")

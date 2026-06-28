@@ -169,6 +169,64 @@ class TelegramBot:
             logger.error(f"sendDocument error: {e}")
             return {"ok": False, "error": str(e)}
 
+    async def send_voice(
+        self,
+        chat_id: int,
+        voice_path: str,
+        caption: Optional[str] = None,
+        duration: Optional[int] = None,
+    ) -> dict:
+        """
+        Send a voice message (OPUS/OGG/MP3) to a Telegram chat.
+
+        Args:
+            chat_id: Telegram chat ID
+            voice_path: Absolute path to audio file
+            caption: Optional caption text
+            duration: Audio duration in seconds (optional)
+
+        Returns:
+            API response dict
+        """
+        path = Path(voice_path).resolve()
+        if not path.exists():
+            return {"ok": False, "error": f"File not found: {voice_path}"}
+        if not path.is_file():
+            return {"ok": False, "error": f"Not a regular file: {voice_path}"}
+
+        file_size = path.stat().st_size
+        max_size = 50 * 1024 * 1024  # 50 MB
+
+        if file_size > max_size:
+            return {"ok": False, "error": f"File too large: {file_size} bytes (max {max_size})"}
+
+        url = f"{self._base_url}/sendVoice"
+        voice_bytes = await asyncio.to_thread(path.read_bytes)
+
+        try:
+            async with httpx.AsyncClient(proxy="socks5://127.0.0.1:1080") as client:
+                data = {"chat_id": str(chat_id)}
+                if caption:
+                    data["caption"] = caption
+                if duration is not None:
+                    data["duration"] = str(duration)
+
+                resp = await client.post(
+                    url,
+                    data=data,
+                    files={"voice": (path.name, voice_bytes)},
+                    timeout=120.0,
+                )
+                result = resp.json()
+                if result.get("ok"):
+                    logger.info(f"Sent voice '{path.name}' to chat {chat_id}")
+                else:
+                    logger.error(f"sendVoice failed: {result}")
+                return result
+        except Exception as e:
+            logger.error(f"sendVoice error: {e}")
+            return {"ok": False, "error": str(e)}
+
     async def _get_file_info(self, file_id: str) -> Optional[dict]:
         """Get file info from Telegram by file_id."""
         result = await self._api_call("getFile", {"file_id": file_id})
@@ -263,14 +321,21 @@ class TelegramBot:
                     self._offset = update["update_id"] + 1
                     if "message" in update:
                         msg = update["message"]
-                        # Handle text messages
-                        if "text" in msg:
+                        # Handle text/caption — may coexist with media
+                        has_text = bool(msg.get("text") or msg.get("caption"))
+                        has_media = bool(
+                            msg.get("document")
+                            or msg.get("photo")
+                            or msg.get("voice")
+                        )
+
+                        if has_text:
+                            # Inject synthesised "text" so downstream sees unified key
+                            if "caption" in msg and "text" not in msg:
+                                msg["text"] = msg["caption"]
                             await self._message_queue.put(msg)
-                        # Handle documents (files)
-                        elif "document" in msg:
-                            await self._file_queue.put(msg)
-                        # Handle photos as documents (get largest size)
-                        elif "photo" in msg:
+
+                        if has_media:
                             await self._file_queue.put(msg)
 
                 # Process text message queue
