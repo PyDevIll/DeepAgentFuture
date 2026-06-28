@@ -133,10 +133,19 @@ async def telegram_send_voice(
 ) -> dict[str, Any]:
     """Generate TTS audio and send as voice message to Telegram chat.
 
+    ⚠️ TTS-READINESS REQUIREMENT: The 'text' parameter is read aloud by TTS.
+    It MUST contain MINIMAL formatting and NO special symbols:
+    - NO backslashes (\\), colons (:), semicolons (;), underscores (_)
+    - NO function names, code snippets, or URLs
+    - NO markdown, JSON, or structured data
+    - Use plain natural speech only — commas and periods are OK
+    - If the desired response contains code/URLs/function names,
+      NEVER pass them as TTS text; omit or rephrase as plain words.
+
     Combines Google Translate TTS + Telegram sendVoice in one call.
 
     Args:
-        text: Text to speak and send (max 200 chars)
+        text: Text to speak (max 200 chars). MUST be TTS-ready plain speech.
         chat_id: Telegram chat ID (numeric string)
         lang: Language code: ru, en, ja, etc. (default: ru)
         caption: Optional caption for the voice message
@@ -193,7 +202,7 @@ def register_all(registry) -> None:
                 },
                 "output_dir": {
                     "type": "string",
-                    "description": "Optional output directory for audio file",
+                    "description": "Optional output directory (default: data/tts_cache)",
                 },
             },
             "required": ["text"],
@@ -203,13 +212,13 @@ def register_all(registry) -> None:
     registry.register_function(
         func=telegram_send_voice,
         name="telegram_send_voice",
-        description="Generate TTS and send as voice message to Telegram chat. Combines Google TTS + sendVoice. Russian by default.",
+        description="Generate TTS and send as voice message to Telegram chat. ⚠️ text MUST be TTS-ready: no special chars (\\:;_), no code, no URLs. Combines Google TTS + sendVoice. Russian by default.",
         parameters={
             "type": "object",
             "properties": {
                 "text": {
                     "type": "string",
-                    "description": "Text to speak (max 200 chars)",
+                    "description": "Text to speak (max 200 chars). ⚠️ MUST be TTS-ready plain speech: NO backslashes, colons, semicolons, underscores, code, URLs, or markdown.",
                 },
                 "chat_id": {
                     "type": "string",

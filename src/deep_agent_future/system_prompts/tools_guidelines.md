@@ -42,7 +42,7 @@
 ### Telegram (`telegram_*`)
 - `telegram_send_file` — Send file from filesystem to Telegram chat by absolute path
 - `telegram_download_file` — Download file from Telegram to filesystem using file_id
-- `telegram_send_voice` — Generate TTS (Google) and send as voice message to Telegram chat. Russian by default
+- `telegram_send_voice` — Generate TTS (Google) and send as voice message to Telegram chat. ⚠️ text MUST be TTS-ready: no special chars (\\:;_), no code, no URLs. Russian by default
 
 ### Text-to-Speech (`tts_*`)
 - `tts_generate` — Generate speech audio (MP3) from text using Google Translate TTS. FREE, no API key needed. Max 200 chars. Supports 50+ languages

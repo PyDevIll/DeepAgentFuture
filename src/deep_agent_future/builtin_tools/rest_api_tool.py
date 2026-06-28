@@ -25,6 +25,7 @@ async def rest_api_call(
     timeout: float = 30.0,
     follow_redirects: bool = True,
     verify: bool = True,
+    proxy: Optional[str] = None,  # 新增
     **kwargs
 ) -> Dict[str, Any]:
     """
@@ -77,7 +78,7 @@ async def rest_api_call(
 
     # Execute request
     try:
-        async with httpx.AsyncClient(verify=verify) as client:
+        async with httpx.AsyncClient(verify=verify, proxy=proxy) as client:
             response = await client.request(method, endpoint, **req_kwargs)
             elapsed = response.elapsed.total_seconds()
             final_url = str(response.url)
@@ -198,6 +199,10 @@ TOOL_DEFINITIONS = [
                     "type": "boolean",
                     "description": "Verify SSL certificates",
                     "default": True
+                },
+                "proxy": {
+                    "type": "string",
+                    "description": "Proxy URL (e.g., 'socks5://127.0.0.1:1080')"
                 }
             },
             "required": ["endpoint"],
