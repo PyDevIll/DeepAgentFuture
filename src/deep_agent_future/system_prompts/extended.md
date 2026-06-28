@@ -37,8 +37,9 @@ C:\Users\delph\PycharmProjects\Deep_Agent_Future\src\deep_agent_future\
 main.py
   1. get_registry()                    → singleton ToolRegistry, auto-registers builtins
   2. register_builtin_tools(registry)  → builtin_tools/__init__.py calls each module's register_all()
+                                         ⚠️ __init__.py has STATIC import list — new .py modules require restart
   3. system_prompts/__init__.py        → assembles prompt: core.md + tools_guidelines.md + extended.md
-                                          + registry.export_tools() (JSON schema injected inline)
+                                           + registry.export_tools() (JSON schema injected inline)
   4. Agent(system_prompt, use_tools=True)
   5. TelegramBot(reasoning_chat_id=...) → starts polling
 ```
@@ -138,7 +139,10 @@ def register_all(registry):
     logger.info("All builtin tools registered")
 ```
 
-**6. Restart or hot-reload.** Restart the application, or call `reload_tools` if already running. The `hot_reload()` mechanism reloads all `builtin_tools.*` modules via `importlib.reload()` and then calls `register_all()` on each.
+**6. ⚠️ CRITICAL — New modules require restart.** 
+   - Adding tools to an **existing** module file → `reload_tools` works (the submodule is reloaded via `pkgutil.iter_modules`)
+   - Creating a **new** `.py` file in `builtin_tools/` → requires updating `__init__.py`'s static import list AND its `register_all()` body. But `hot_reload()` does NOT reload `__init__.py` (the package itself), so the new import has NO effect until full app restart.
+   - **RULE**: All new tools MUST be added to EXISTING module files only. Never create new `.py` modules in `builtin_tools/` unless you accept a mandatory restart.
 
 **7. Update this file.** Add the new tool to the CAPABILITIES section below.
 
