@@ -28,8 +28,7 @@ This document describes all built‑in tools available to the MASTERMIND v2 agen
 | `fs_cd` | ★★★☆☆ | Changes the agent’s virtual working directory. Rarely needed when using absolute paths.                                                                         |
 | `fs_pwd` | ★★★★☆ | Prints the current virtual working directory. Simple and effective.                                                                                             |
 | `fs_sizes` | ★★★☆☆ | Lists largest files in a directory – useful for clean‑up.                                                                                                       |
-| `fs_edit` | ★★★☆☆ | Line‑range replacement (1‑indexed). **Deprecated:** prefer `fs_aedit` or `fs_edit_blocks` – brittle due to line‑number drift between reads and writes.          |
-| `fs_append` | ★★★★☆ | Appends text to the end of a file. Simple and reliable.                                                                                                         |
+| `fs_append` | ★★★★☆ | Appends text to the end of a file. Simple and reliable. |
 
 ---
 
@@ -115,6 +114,26 @@ This document describes all built‑in tools available to the MASTERMIND v2 agen
 
 ---
 
+### Aider (`aider_run`)
+
+| Tool | Rating | Notes |
+|------|--------|-------|
+| `aider_run` | ★★★★☆ | **AI coding assistant.** Pass an `instruction` (what to change) + comma‑separated `files`. Uses DeepSeek-v4-flash by default. **Use case:** complex multi‑file refactoring, boilerplate generation, or when manual `fs_aedit` becomes tedious. **Workflow:** identify the need → formulate precise instruction → list target files → call `aider_run`. Always verify changes with `git_diff` afterward. |
+
+---
+
+### Window Management (`window_*`)
+
+| Tool | Rating | Notes |
+|------|--------|-------|
+| `window_list` | ★★★★★ | Lists all visible top‑level windows with handles, titles, and sizes. Reliable. |
+| `window_get_content` | ★★★★☆ | Extracts UI Automation tree from a window as structured JSON. `max_depth` controls recursion. |
+| `window_click` | ★★★★★ | Clicks a UI element (button, checkbox, menu item) by name substring. Works on most standard controls. |
+| `window_send_keys` | ★★★★☆ | Sends keyboard input to a window. Supports `{ENTER}`, `{CTRL}c`, etc. Sets focus first by default. |
+| `window_screenshot` | ★★★★★ | Captures a screenshot of a specific window. Useful for UI debugging or OCR pipelines. |
+
+---
+
 ### Meta
 
 | Tool | Rating | Notes |
@@ -124,7 +143,7 @@ This document describes all built‑in tools available to the MASTERMIND v2 agen
 
 ---
 
-## Tool Execution — General Rules
+## Tool Execution
 
 - **All tools are asynchronous** — independent calls can be executed in parallel for efficiency.
 - **Return value:** every tool returns a **string** result. On error, the tool returns a descriptive error message (exceptions are never propagated to the agent).
@@ -139,6 +158,8 @@ This document describes all built‑in tools available to the MASTERMIND v2 agen
 3. **Web requests:** the default proxy `socks5://127.0.0.1:1080` provides a Frankfurt‑based external IP (`45.43.89.52`). Use it when necessary.
 4. **Git:** use `git_diff` before `git_commit` to review changes.
 5. **New tools:** after adding any new tool module, immediately call `reload_tools` to make it available.
+6. **Aider workflow:** identify the need → formulate a precise instruction → list target files → call `aider_run`. Always verify changes with `git_diff` afterward. Do not use Aider for single-file trivial edits — `fs_aedit`/`fs_edit_blocks` are faster.
+7. **Window automation:** use `window_list` to discover handles, `window_get_content` to inspect UI structure, then `window_click`/`window_send_keys` to act. Screenshot for visual debugging.
 
 ---
 

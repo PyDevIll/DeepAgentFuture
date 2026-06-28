@@ -174,14 +174,18 @@ class ToolRegistry:
             logger.error(f"Failed to reload package '{package}': {e}")
 
         # 3) Re-register all tools
-        old_count = len(self._tools)
         old_names = set(self._tools.keys())
+        # ⚠️ Clear registry BEFORE re-registration so removed tools are purged
+        self._tools.clear()
         try:
             from deep_agent_future.builtin_tools import register_all
             register_all(self)
         except Exception as e:
             logger.error(f"register_all failed: {e}")
             logger.error(traceback.format_exc())
+            # On error, restore old tools to avoid data loss
+            for k in list(old_names - set(self._tools.keys())):
+                self._tools.setdefault(k, None)
 
         new_count = len(self._tools)
         new_names = set(self._tools.keys())

@@ -582,16 +582,6 @@ TOOL_DEFINITIONS = [
             "top": {"type": "integer", "description": "Number of entries (default 20)"},
         },
     }),
-    ("fs_edit", fs_edit, "Replace lines in a text file (line numbers 1-indexed, inclusive)", {
-        "type": "object",
-        "properties": {
-            "file": {"type": "string", "description": "File path"},
-            "start_line": {"type": "integer", "description": "Start line (1-indexed)"},
-            "end_line": {"type": "integer", "description": "End line (1-indexed, inclusive)"},
-            "new_content": {"type": "string", "description": "New content to insert"},
-        },
-        "required": ["file", "start_line", "end_line", "new_content"],
-    }),
     ("fs_append", fs_append, "Append text to end of file", {
         "type": "object",
         "properties": {
