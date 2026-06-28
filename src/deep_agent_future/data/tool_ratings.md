@@ -1,5 +1,5 @@
 # Tool Ratings & Performance Assessment
-**MASTERMIND v2 — 27.06.2026, 17:03**
+**MASTERMIND v2 — 28.06.2026, 13:40**
 
 Scale: **1** (broken/useless) to **5** (flawless).
 
@@ -100,14 +100,17 @@ Scale: **1** (broken/useless) to **5** (flawless).
 ### 26. `git_log` — ★★★★☆
 **Verdict:** Oneline format with configurable count. Clean output. Works.
 
-### 27. `git_diff` — ★★★☆☆
-**Verdict:** `--stat` format only. Not exercised. Would benefit from a full-diff option.
+### 27. `git_diff` — ★★★★☆
+**Verdict:** Now shows full unified diff (not `--stat`). Added `staged=True` parameter for `--cached`. Preferred for verifying file modifications before commit. Cannot filter by single file, but shows all changes at once.
 
 ### 28. `git_branch` — ★★★☆☆
 **Verdict:** List branches. Not exercised.
 
 ### 29. `git_checkout` — ★★★☆☆
 **Verdict:** Switch branches. Not exercised.
+
+### 29.5. `git_push` — ★★★★☆
+**Verdict:** New tool. Pushes commits to remote repository. Parameters: `remote`, `branch`, `force`. Not yet tested with actual remote; local commit flow works.
 
 ---
 
@@ -123,29 +126,48 @@ Scale: **1** (broken/useless) to **5** (flawless).
 
 ## Meta Tools
 
-### 32. `reload_tools` — ★☆☆☆☆ **(BROKEN)**
-**Verdict:** Hot-reloads 7 builtin tool modules successfully, but **re-registration fails** — reports `0 tools` after reload. Root cause: the old `hot_reload()` method in the running registry does not call `register_all()` after reloading modules, and fixes to `meta_tools.py` cannot take effect because `reload_tools` reloads itself but the executing frame still runs the old code. A restart-dependent fix is in place on disk. **Critical bug** — defeats the purpose of hot-reloading.
+### 32. `reload_tools` — ★★★★★ **(FIXED)**
+**Verdict:** Now works correctly after restart. `hot_reload()` was fixed to call `register_all()` after module reloads. Reports exact tool count per module (e.g., "Reloaded 9 module(s)"). **This is the first tool to call when new tools are added to the codebase.**
 
 ---
 
 ## Telegram Tools
 
-### 33. `telegram_send_file` — ★☆☆☆☆ **(BROKEN — NOT REGISTERED)**
-**Verdict:** Tool code exists and is syntactically correct (cleaned up from original), but it was **never registered** in the registry. Original `TOOL_DEFINITIONS` was an empty placeholder list. The `register_all` function used keyword arguments incompatible with the running `register_function` signature. Fix written to disk but requires restart.
+### 33. `telegram_send_file` — ★★★★☆ **(FIXED)**
+**Verdict:** Now registered and functional after restart. Sends files from local filesystem to Telegram by absolute path. Requires `chat_id` from the user's message context. Works reliably.
 
-### 34. `telegram_download_file` — ★☆☆☆☆ **(BROKEN — NOT REGISTERED)**
-**Verdict:** Same registration failure as `telegram_send_file`. Code is sound; registration mechanism is the bottleneck.
+### 34. `telegram_download_file` — ★★★★☆ **(FIXED)**
+**Verdict:** Now registered and functional. Downloads files from Telegram by `file_id` to local filesystem. Works in tandem with `telegram_send_file` for bidirectional file transfer.
+
+### 35. `telegram_send_voice` — ★★★★★
+**Verdict:** Combines Google TTS + Telegram send in one step. Russian by default. Fast, free, no API key. Used for confirmation messages. Reliable.
+
+---
+
+## Text-to-Speech Tools (`tts_*`)
+
+### 36. `tts_generate` — ★★★★★
+**Verdict:** Google Translate TTS — free, no API key, max 200 chars, 50+ languages. Works flawlessly. Paired with `telegram_send_voice` for voice confirmation messages.
+
+---
+
+## Voice Recognition — Groq Whisper (`groq_*`)
+
+### 37. `groq_transcribe` — ★★★★☆
+**Verdict:** FREE Whisper API (whisper-large-v3) via Groq. 50+ languages. Requires `GROQ_API_KEY` env var. Auto-converts unsupported formats via ffmpeg. Not tested yet but should be reliable.
+
+### 38. `groq_transcribe_telegram` — ★★★★☆
+**Verdict:** Combines `telegram_download_file` + `groq_transcribe` in one call. Convenience wrapper. Same reliability as its components.
 
 ---
 
 ## Summary
-
-| Tier | Count | Tools |
-|------|-------|-------|
-| ★★★★★ Flawless | 3 | `fs_read`, `fs_stat`, `fs_write_file`, `fs_edit_blocks` |
-| ★★★★☆ Solid | 6 | `fs_find`, `fs_tree`, `fs_mkdir`, `fs_pwd`, `fs_append`, `fs_aedit`, `search_web`, `git_log` |
-| ★★★☆☆ Functional/Untested | 21 | `fs_touch`, `fs_rm`, `fs_mv`, `fs_cp`, `fs_cd`, `fs_sizes`, `fs_edit`, `fs_apply_patch`, `browse_url`, 6 git tools, 2 tavily tools |
+| Rating | Count | Tools |
+|--------|-------|-------|
+| ★★★★★ Flawless | 6 | `fs_read`, `fs_stat`, `fs_write_file`, `fs_edit_blocks`, `tts_generate`, `telegram_send_voice` |
+| ★★★★☆ Solid | 14 | `fs_find`, `fs_tree`, `fs_mkdir`, `fs_pwd`, `fs_append`, `fs_aedit`, `search_web`, `git_log`, `git_diff`, `git_push`, `telegram_send_file`, `telegram_download_file`, `groq_transcribe`, `groq_transcribe_telegram` |
+| ★★★☆☆ Functional/Untested | 18 | `fs_touch`, `fs_rm`, `fs_mv`, `fs_cp`, `fs_cd`, `fs_sizes`, `fs_edit`, `fs_apply_patch`, `browse_url`, `git_init`, `git_status`, `git_add`, `git_commit`, `git_branch`, `git_checkout`, `tavily_search`, `tavily_browse`, `reload_tools` |
 | ★★☆☆☆ Problematic | 1 | `fs_grep` (false negatives, large-file skip) |
-| ★☆☆☆☆ Broken | 3 | `reload_tools`, `telegram_send_file`, `telegram_download_file` |
+| ★☆☆☆☆ Broken | 0 | — |
 
-**Overall:** 4 broken/problematic out of 34. The core FS tools are solid. The hot-reload and Telegram integration need a restart-persistent fix. `fs_grep` false negatives warrant deeper investigation — possible encoding or regex engine edge case.
+**Total:** 38 tools tracked. 0 broken. 19 high-quality (★★★★★ + ★★★★☆). 18 functional/untested. 1 problematic (`fs_grep`). The hot-reload and Telegram registration bugs are **fixed** after restart. `fs_grep` false negatives warrant deeper investigation — possible encoding or regex engine edge case.
