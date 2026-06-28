@@ -150,39 +150,42 @@ async def window_get_content(
     if win is None:
         return f"Error: window not found for identifier: {window_identifier}"
 
+    def _get_control_text(ctrl: auto.Control) -> str:
+        """Extract the best available text from a control."""
+        # 1) Try ValuePattern (for edit controls, etc.)
+        try:
+            val_pattern = ctrl.GetPattern(auto.ValueControlPattern)
+            if val_pattern:
+                value = val_pattern.CurrentValue
+                if value:
+                    return value
+        except Exception:
+            pass
+
+        # 2) Try TextPattern (for static text, document controls)
+        try:
+            text_pattern = ctrl.GetPattern(auto.TextControlPattern)
+            if text_pattern:
+                doc = text_pattern.CurrentDocument
+                if doc:
+                    return doc
+        except Exception:
+            pass
+
+        # 3) Fallback to Name
+        return ctrl.Name or ""
+
     def extract_element(ctrl: auto.Control, depth: int) -> dict:
         if depth > max_depth:
             return {"type": "truncated", "depth": depth}
+
         info = {
             "control_type": str(ctrl.ControlType),
             "name": ctrl.Name or "",
             "automation_id": ctrl.AutomationId or "",
             "class_name": ctrl.ClassName or "",
+            "text": _get_control_text(ctrl),   # <-- fixed
         }
-        # Get direct text (if any)
-        try:
-            # Text from ValuePattern (editable fields, inputs, sliders)
-            value_pattern = ctrl.GetPattern(auto.ValueControlPattern)
-            if value_pattern:
-                info["value"] = value_pattern.CurrentValue or ""
-        except Exception:
-            pass
-        # Text from TextPattern (rich text, paragraphs, labels)
-        try:
-            text_pattern = ctrl.GetPattern(auto.TextPattern)
-            if text_pattern:
-                text_range = text_pattern.DocumentRange
-                info["text"] = text_range.GetText(5000) if text_range else ""
-        except Exception:
-            pass
-        # Legacy/fallback: get visible text via Name or LegacyIAccessible
-        if not info.get("value") and not info.get("text"):
-            try:
-                legacy = ctrl.GetPattern(auto.LegacyIAccessiblePattern)
-                if legacy:
-                    info["legacy_text"] = legacy.CurrentDefaultAction or legacy.CurrentName or ""
-            except Exception:
-                pass
 
         if include_children and depth < max_depth:
             children = []
@@ -190,6 +193,7 @@ async def window_get_content(
                 children.append(extract_element(child, depth + 1))
             if children:
                 info["children"] = children
+
         return info
 
     try:
