@@ -16,31 +16,88 @@ MIN_POLL_PERIOD = timedelta(seconds=3)
 LONG_POLL_TIMEOUT = 60
 
 
-# # --- Module-level singleton for tool access ---
-# _bot_instance: Optional['TelegramBot'] = None
-#
-#
-# def get_bot() -> Optional['TelegramBot']:
-#     """Get the current TelegramBot instance (for tool access)."""
-#     return _bot_instance
-#
-#
-# def set_bot(bot: 'TelegramBot') -> None:
-#     """Set the global TelegramBot instance."""
-#     global _bot_instance
-#     _bot_instance = bot
-#
+def _escape_markdown_v2(text: str) -> str:
+    """Smart escape for Telegram MarkdownV2. Preserves intentional markdown formatting."""
+    # Store markdown patterns with unique markers
+    markers: dict[str, str] = {}
+    counter: list[int] = [0]
 
-def _escape_markdown(text: str) -> str:
-    """Escape special characters for Telegram MarkdownV2."""
-    special_chars = r'_*[]()~`>#+-=|{}.!'
-    result = []
-    for char in text:
-        if char in special_chars:
-            result.append('\\' + char)
+    # Order matters: more specific patterns first — headings and lists before inline patterns
+    # 1. Fenced code blocks (``` ... ```)
+    for match in re.finditer(r'```(\w*)\n(.*?)```', text, re.DOTALL):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'```{match.group(1)}\n{match.group(2)}```'
+
+    # 2. Inline code (`code`)
+    for match in re.finditer(r'`([^`]+)`', text):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'`{match.group(1)}`'
+
+    # 3. Markdown links [text](url)
+    for match in re.finditer(r'\[([^\]]+)\]\(([^)]+)\)', text):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'[{match.group(1)}]({match.group(2)})'
+
+    # 4. Bold **text**
+    for match in re.finditer(r'\*\*(.+?)\*\*', text):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'**{match.group(1)}**'
+
+    # 5. Headings ###, ##, #
+    for match in re.finditer(r'^### (.+)$', text, re.MULTILINE):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'### {match.group(1)}'
+    for match in re.finditer(r'^## (.+)$', text, re.MULTILINE):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'## {match.group(1)}'
+    for match in re.finditer(r'^# (.+)$', text, re.MULTILINE):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'# {match.group(1)}'
+
+    # 6. Italic *text* (word-boundary aware to avoid accidental italics)
+    for match in re.finditer(r'(?<!\w)\*(?!\*)(.+?)(?<!\w)\*(?!\*)', text):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'*{match.group(1)}*'
+
+    # 7. Unordered list items (- at line start)
+    for match in re.finditer(r'^- (.+)$', text, re.MULTILINE):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'- {match.group(1)}'
+
+    # 8. Ordered list items (digits followed by dot)
+    for match in re.finditer(r'^\d+\. (.+)$', text, re.MULTILINE):
+        key = f'\uE000{counter[0]}\uE001'
+        counter[0] += 1
+        markers[key] = f'{match.group(0)}'
+
+    # Replace preserved patterns with markers
+    for key, original in sorted(markers.items(), key=lambda x: -len(x[1])):  # longest first
+        text = text.replace(original, key, 1)
+
+    # Escape all remaining special chars for MarkdownV2
+    special = set('_[]()~`>#+-=|{}.!')
+    result_chars = []
+    for ch in text:
+        if ch in special:
+            result_chars.append('\\' + ch)
         else:
-            result.append(char)
-    return ''.join(result)
+            result_chars.append(ch)
+    text = ''.join(result_chars)
+
+    # Restore preserved markdown
+    for key, original in markers.items():
+        text = text.replace(key, original)
+
+    return text
 
 
 class TelegramBot:
@@ -85,16 +142,18 @@ class TelegramBot:
         # Truncate if too long (Telegram limit: 4096)
         if len(text) > 4000:
             text = text[:4000] + "\n\n... (truncated)"
+        # Smart escape for MarkdownV2 - preserves intentional formatting
+        escaped_text = _escape_markdown_v2(text)
         result = await self._api_call("sendMessage", {
             "chat_id": chat_id,
-            "text": text,
+            "text": escaped_text,
             "parse_mode": "MarkdownV2",
         })
         if not result.get("ok"):
             # Retry without markdown
             result = await self._api_call("sendMessage", {
                 "chat_id": chat_id,
-                "text": text,
+                "text": text,  # original unescaped text
             })
         return result
 
