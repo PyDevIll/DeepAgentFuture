@@ -6,6 +6,7 @@ import importlib
 import sys
 import pkgutil
 import inspect
+import traceback
 from typing import Any, Callable, Dict, Optional
 from dataclasses import dataclass, field
 
@@ -125,7 +126,17 @@ class ToolRegistry:
 
 
     def hot_reload(self) -> int:
-        """Reload all submodules and re-register their tools."""
+        """Reload all submodules and re-register their tools.
+
+        Fixes applied:
+          1. Log errors from any failed submodule reload as ERROR.
+          2. Also reload the package __init__.py so that register_all
+             picks up the current submodule versions.
+          3. Catch ANY exception from register_all, not just ImportError.
+          4. Log which tools were added AND which disappeared.
+          5. Compare post-register list against TOOL_DEFINITIONS from each
+             submodule to detect missing registrations.
+        """
         reloaded = 0
         package = self._tools_package
         if package not in sys.modules:
@@ -137,6 +148,8 @@ class ToolRegistry:
         pkg = sys.modules[package]
         if not hasattr(pkg, '__path__'):
             return 0
+
+        # 1) Reload all submodules
         for _, mod_name, _ in pkgutil.iter_modules(pkg.__path__, prefix=package + '.'):
             if mod_name in sys.modules:
                 try:
@@ -152,23 +165,59 @@ class ToolRegistry:
                     reloaded += 1
                 except Exception as e:
                     logger.error(f"Failed to load '{mod_name}': {e}")
-        # Critical: re-register all tools after module reloads
+
+        # 2) Also reload the package __init__.py itself
+        try:
+            importlib.reload(sys.modules[package])
+            reloaded += 1
+        except Exception as e:
+            logger.error(f"Failed to reload package '{package}': {e}")
+
+        # 3) Re-register all tools
+        old_count = len(self._tools)
+        old_names = set(self._tools.keys())
         try:
             from deep_agent_future.builtin_tools import register_all
-            old_count = len(self._tools)
-            old_names = sorted(self._tools.keys())
             register_all(self)
-            new_count = len(self._tools)
-            new_names = sorted(self._tools.keys())
-            added = set(new_names) - set(old_names)
-            if added:
-                logger.info(f"hot_reload: +{len(added)} new tools: {sorted(added)}")
-            logger.info(f"Registry reloaded: {reloaded} modules, {old_count}→{new_count} tools")
-        except ImportError as e:
-            logger.error(f"Failed to import register_all: {e}")
-            logger.error(f"Failed to import register_all: {e}")
+        except Exception as e:
+            logger.error(f"register_all failed: {e}")
+            logger.error(traceback.format_exc())
+
+        new_count = len(self._tools)
+        new_names = set(self._tools.keys())
+        added = new_names - old_names
+        removed = old_names - new_names
+        if added:
+            logger.info(f"hot_reload: +{len(added)} new tools: {sorted(added)}")
+        if removed:
+            logger.warning(f"hot_reload: -{len(removed)} tools DISAPPEARED: {sorted(removed)}")
+        logger.info(f"Registry reloaded: {reloaded} modules, {old_count}→{new_count} tools")
+
+        # 4) Verify all TOOL_DEFINITIONS are actually registered
+        self._verify_registration()
+
         self._version += 1
         return reloaded
+
+    def _verify_registration(self) -> None:
+        """Check that every tool defined in TOOL_DEFINITIONS is actually
+        present in the registry after reload."""
+        import importlib
+        package = self._tools_package
+        pkg = sys.modules.get(package)
+        if not pkg or not hasattr(pkg, '__path__'):
+            return
+        for _, mod_name, _ in pkgutil.iter_modules(pkg.__path__, prefix=package + '.'):
+            mod = sys.modules.get(mod_name)
+            if mod is None:
+                continue
+            tdefs = getattr(mod, 'TOOL_DEFINITIONS', None)
+            if not tdefs:
+                continue
+            for name, func, desc, params in tdefs:
+                if name not in self._tools:
+                    logger.error(f"VERIFY: tool '{name}' defined in {mod_name}.TOOL_DEFINITIONS "
+                                 f"but NOT registered in registry!")
 
     def list_tools(self) -> str:
         lines = [f"ToolRegistry v{self._version} — {len(self._tools)} tools:"]
