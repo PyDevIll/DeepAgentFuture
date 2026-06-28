@@ -70,6 +70,52 @@ async def exec_python(parameter: str, timeout: int = 30) -> str:
         }, ensure_ascii=False)
 
 
+async def exec_shell(command: str, timeout: int = 30) -> str:
+    """Execute arbitrary shell command on Windows 10 using cmd.exe /c.
+
+    ⚠️ DANGEROUS: Full shell access. Use with extreme caution.
+    - Runs via cmd.exe /c {command}
+    - Supports batch commands, pipes, redirects (>, |, &&)
+    - Returns JSON: stdout, stderr, returncode
+    - Timeout kills the process
+
+    Args:
+        command: Shell command string (e.g., "dir /b", "ipconfig", "echo hello")
+        timeout: Execution timeout in seconds (default: 30)
+
+    Returns:
+        JSON string with stdout, stderr, returncode
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "cmd.exe", "/c", command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=os.getcwd(),
+        )
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+        return json.dumps({
+            "stdout": stdout.decode('utf-8', errors='replace'),
+            "stderr": stderr.decode('utf-8', errors='replace'),
+            "returncode": proc.returncode,
+        }, ensure_ascii=False)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return json.dumps({
+            "stdout": "",
+            "stderr": f"Timeout ({timeout}s) exceeded",
+            "returncode": -1,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({
+            "stdout": "",
+            "stderr": f"Execution error: {e}",
+            "returncode": -1,
+        }, ensure_ascii=False)
+
+
 TOOL_DEFINITIONS = [
     ("ping", ping, "Simple ping/pong health check. Returns pong with current timestamp.", {
         "type": "object",
@@ -92,7 +138,24 @@ TOOL_DEFINITIONS = [
         },
         "required": ["parameter"],
     }),
+    ("exec_shell", exec_shell, "Execute arbitrary shell command on Windows 10 (cmd.exe /c). "
+     "⚠️ Full shell access. Supports pipes, redirects, batch commands.", {
+        "type": "object",
+        "properties": {
+            "command": {
+                "type": "string",
+                "description": "Shell command (e.g., 'dir /b', 'ipconfig', 'type file.txt')"
+            },
+            "timeout": {
+                "type": "integer",
+                "description": "Execution timeout in seconds (default: 30)",
+                "default": 30
+            }
+        },
+        "required": ["command"],
+    }),
 ]
+
 
 
 def register_all(registry):

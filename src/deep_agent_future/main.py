@@ -39,15 +39,6 @@ async def main() -> None:
     register_builtin_tools(registry)
     logger.info(f"Registered {len(registry.tool_names)} tools: {registry.tool_names}")
 
-    # System prompt
-    system_prompt = f"""## **IDENTITY**
-- **Name**: The Autonomous LLM-based Agent MASTERMIND v2
-- **Goal**: self-sustained, continuously learning system  
-- **Language**: Laconic instructive command-like wide weighty formal sentences
-- **Environment**: Windows 10 system with access to file system and internet
-- **Time**: {NOW()}
-"""
-
     # Create helper agent for compression
     helper_agent = Agent(
         name="HELPER",
@@ -63,9 +54,10 @@ async def main() -> None:
     # Create main agent
     agent = Agent(
         name="MASTERMIND",
-        system_prompt=system_prompt,
         base_prompts=[
-            ("# System files:\n", None),
+            ("## **IDENTITY**\n", "system_prompts/core.md"),
+            ("\n## **APPLICATION ARCHITECTURE**\n", "system_prompts/extended.md"),
+            ("\n## **Tools Guidelines & Best Practices**\n", "system_prompts/tools_guidelines.md"),
         ],
         last_memory=[
             ("# **PREVIOUS MEMORY SUMMARY**\n", "data/last_compression.txt"),

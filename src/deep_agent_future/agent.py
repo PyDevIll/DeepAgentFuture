@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 from loguru import logger
 
 from context_manager import ContextPool
-from tool_registry import ToolRegistry, get_registry
+from tool_registry import get_registry   # <-- always fetch live
 
 LLM_MAX_OUTPUT_TOKENS = 30000
 LLM_MODEL = "deepseek-v4-flash"  # thinking mode enabled
@@ -34,7 +34,7 @@ def construct_history(prompts_list: list[tuple[str, Optional[str]]]) -> list[dic
                 logger.warning(f"File {prompt_file} not loaded")
         content += "\n\n---\n\n"
         composed.append({
-            "role": "user",
+            "role": "system",
             "name": "MASTERMIND",
             "content": content,
         })
@@ -51,24 +51,21 @@ def validate_message_sequence(messages: list[dict]) -> None:
     for i, msg in enumerate(messages):
         role = msg.get("role")
         if role == "assistant" and msg.get("tool_calls"):
-            # Collect all tool_call_ids from this assistant message
             for tc in msg["tool_calls"]:
                 tool_call_ids.add(tc["id"])
         elif role == "tool":
             tc_id = msg.get("tool_call_id")
             if tc_id not in tool_call_ids:
-                # Check if the immediately preceding message is assistant with this id
                 prev = messages[i-1] if i > 0 else None
                 if prev and prev.get("role") == "assistant" and prev.get("tool_calls"):
-                    # Check if the id exists in its tool_calls
                     ids_in_prev = {tc["id"] for tc in prev["tool_calls"]}
                     if tc_id in ids_in_prev:
-                        continue  # valid
-                # If we reach here, it's orphaned
+                        continue
                 raise ValueError(
                     f"Orphaned tool message at index {i} with tool_call_id={tc_id}. "
                     f"Preceding message: {prev} (if any)."
                 )
+
 
 class Agent:
     """Async reasoning agent with hot-reload tools, crash recovery, and layered context."""
@@ -93,7 +90,8 @@ class Agent:
         self._save_history = save_history
         self._helper_agent: Optional[Agent] = None
         self.messages = ContextPool()
-        self._registry: ToolRegistry = get_registry()
+        # DO NOT CACHE registry – always fetch live to support hot‑reload
+        # self._registry = get_registry()  <-- REMOVED
 
         # Load last memory into context (from previous compression)
         if self._last_memory:
@@ -106,15 +104,17 @@ class Agent:
         self._helper_agent = helper
 
     @property
-    def registry(self) -> ToolRegistry:
-        return self._registry
+    def registry(self):
+        """Get the current global tool registry (always up‑to‑date)."""
+        return get_registry()
 
     async def _execute_single_tool(self, tool_call, user_request: str = "") -> dict:
         """Execute one tool call and return the result message."""
         func_name = tool_call.function.name
-        logger.debug(f"_execute_single_tool: '{func_name}' | registry v{self._registry._version} | tools: {len(self._registry._tools)}")
-        if func_name not in self._registry._tools:
-            logger.error(f"_execute_single_tool: '{func_name}' NOT in registry._tools! Available: {sorted(self._registry._tools.keys())}")
+        registry = get_registry()   # always live
+        logger.debug(f"_execute_single_tool: '{func_name}' | registry v{registry._version} | tools: {len(registry._tools)}")
+        if func_name not in registry._tools:
+            logger.error(f"_execute_single_tool: '{func_name}' NOT in registry._tools! Available: {sorted(registry._tools.keys())}")
         try:
             args = json.loads(tool_call.function.arguments)
         except json.JSONDecodeError as e:
@@ -129,7 +129,7 @@ class Agent:
         logger.info(f"Tool: {func_name}({json.dumps(args, ensure_ascii=False)[:200]})")
         try:
             result = await asyncio.wait_for(
-                self._registry.call_tool(func_name, **args),
+                registry.call_tool(func_name, **args),
                 timeout=120.0  # 2-minute timeout per tool
             )
         except asyncio.TimeoutError:
@@ -169,10 +169,10 @@ class Agent:
 
     def _build_messages_for_llm(self) -> list[dict]:
         """Build full message list with all memory layers.
-        
+
         Order (DeepSeek cache-optimized):
           system → base_prompts → persistent → compressed → masked → sliding window
-        
+
         Critical: every assistant message MUST have non-empty content OR tool_calls.
         """
         self.messages.log_state("STATE AT build_messager_for_llm")
@@ -243,7 +243,6 @@ class Agent:
             validate_message_sequence(messages)
         except ValueError as e:
             logger.error(f"Message sequence validation failed: {e}")
-            # Optionally dump full messages to file for inspection
             import json
             with open("invalid_messages.json", "w", encoding='utf-8') as f:
                 json.dump(messages, f, indent=2, default=str)
@@ -260,7 +259,8 @@ class Agent:
         est_tokens = ctx_len // 3
         logger.info(f"LLM request: {len(messages)} msgs, ~{est_tokens} tokens")
 
-        tools = self._registry.get_openai_tools() if self._use_tools else []
+        registry = get_registry()   # always live
+        tools = registry.get_openai_tools() if self._use_tools else []
         if tools:
             logger.debug(f"llm_request: passing {len(tools)} tools to API: {[t['function']['name'] for t in tools]}")
 
@@ -274,15 +274,12 @@ class Agent:
                 temperature=1.0,
             )
         except Exception as e:
-            # Log full error with traceback and dump messages to file
             logger.exception(f"LLM API call failed: {e}")
-            # Dump messages for post-mortem
             import json
             with open("failed_messages.json", "w", encoding="utf-8") as f:
                 json.dump(messages, f, indent=2, default=str)
-            raise  # re-raise
+            raise
 
-        # Validate response structure
         if response is None:
             raise ValueError("API returned None response")
         if not hasattr(response, "choices") or not response.choices:
@@ -290,11 +287,9 @@ class Agent:
 
         response_dict = response.model_dump()
         if not response_dict.get("choices"):
-            # The API might have returned an error. Log the full response.
             logger.error(f"LLM response has no choices: {response_dict}")
             raise ValueError(f"Invalid LLM response: {response_dict}")
         return response_dict
-
 
     async def run(self, initial_user_request: str = "", reasoning_callback=None) -> str:
         """
@@ -332,20 +327,18 @@ class Agent:
         while iteration < max_iterations:
             iteration += 1
 
-            # Check for new tools (hot-reload)
-            if self._registry.version > 0:
-                logger.debug(f"Registry v{self._registry.version}, {len(self._registry.tool_names)} tools ready")
+            # Check for new tools (hot-reload) – always use live registry
+            registry = get_registry()
+            if registry.version > 0:
+                logger.debug(f"Registry v{registry.version}, {len(registry.tool_names)} tools ready")
 
             try:
                 response = await self.llm_request()
             except Exception as e:
                 logger.exception(f"LLM request failed at iteration {iteration}")
-                # Log the current messages state
                 self.messages.log_state("FAILED LLM REQUEST")
-                # Optionally dump messages
                 import json
                 with open("failed_context.json", "w", encoding='utf-8') as f:
-                    # You'll need to serialize the messages, maybe using self.messages._all_entries
                     json.dump([self.messages._entry_to_dict(e) for e in self.messages._all_entries], f, indent=2,
                               default=str)
                 raise
@@ -410,7 +403,7 @@ class Agent:
         try:
             return await self.run(initial_user_request, reasoning_callback)
         except Exception as e:
-            logger.exception(f"Agent crashed: {e}")  # prints full traceback
+            logger.exception(f"Agent crashed: {e}")
             self.messages._emergency_save()
             raise
 
