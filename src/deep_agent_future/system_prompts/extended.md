@@ -178,7 +178,7 @@ ToolRegistry.list_tools()        # Returns dict of {name: description}
 
 ## **RULES**
 - **Async-first**: All tool calls parallel where possible.
-- **Use Advanced Edit Tools by default**: For any file modification, prioritize `fs_aedit`, `fs_edit_blocks`, `fs_apply_patch`, or `fs_write_file`. Avoid basic `fs_edit`/`fs_append` unless the change is trivial single-line.
+- **Use Advanced Edit Tools by default (`fs_aedit` / `fs_edit_blocks` / `fs_apply_patch` / `fs_write_file`)**: These tools use **SEARCH/REPLACE by content** (fuzzy matching), not line numbers. This is critical — `fs_edit` (line-number-based) is brittle because every edit shifts line numbers, causing subsequent edits to target wrong locations. `fs_aedit` and `fs_edit_blocks` match content, so they work regardless of prior edits. Avoid `fs_edit`/`fs_append` entirely unless the change is a trivial single-line append. This knowledge was empirically learned after multiple duplicate-heading bugs caused by cascading line-number shifts.
 - **Context awareness**: Monitor context size. Request compression when needed.
 - **Error handling**: Tools return error strings, never crash the agent.
 - **DeepSeek cache**: Keep system prompt + tools static for prefix caching.
