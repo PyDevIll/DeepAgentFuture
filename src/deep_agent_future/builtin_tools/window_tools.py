@@ -311,7 +311,76 @@ async def window_send_keys(
             import asyncio
             await asyncio.sleep(0.2)
 
-        pyautogui.write(keys)
+        import re
+        # Parse key sequence supporting:
+        #   {CTRL}c         → hotkey('ctrl', 'c')
+        #   {CTRL}{SHIFT}esc → hotkey('ctrl', 'shift', 'escape')
+        #   {ENTER}         → press('enter')
+        #   {F1}..{F12}     → press('f1')
+        #   plain text      → write(text)
+        MODIFIERS = {'ctrl', 'shift', 'alt', 'win'}
+
+        def send_keys_parsed(seq: str) -> None:
+            # Tokenize: split on {KEYWORD} boundaries, keep delimiters
+            tokens = re.split(r'(\{[A-Za-z0-9]+\})', seq)
+            i = 0
+            while i < len(tokens):
+                token = tokens[i]
+                if not token:
+                    i += 1
+                    continue
+                if token.startswith('{') and token.endswith('}'):
+                    # It's a keyword or modifier
+                    key_name = token[1:-1].lower()
+                    if key_name in MODIFIERS:
+                        # Modifier hotkey: collect consecutive modifiers + next literal token(s)
+                        mods = [key_name]
+                        i += 1
+                        # Collect more modifiers
+                        while i < len(tokens):
+                            t = tokens[i]
+                            if t.startswith('{') and t.endswith('}'):
+                                kn = t[1:-1].lower()
+                                if kn in MODIFIERS:
+                                    mods.append(kn)
+                                    i += 1
+                                    continue
+                                elif kn:
+                                    # Standalone key like {ENTER} as hotkey target
+                                    mods.append(kn)
+                                    i += 1
+                                    break
+                            elif t and not t.isspace():
+                                # Literal character(s) following modifiers
+                                for ch in t:
+                                    mods.append(ch)
+                                i += 1
+                                break
+                            else:
+                                i += 1
+                                break
+                        pyautogui.hotkey(*mods)
+                    else:
+                        # Standalone special key
+                        mapping = {
+                            'enter': 'enter', 'tab': 'tab', 'esc': 'escape',
+                            'escape': 'escape', 'backspace': 'backspace',
+                            'delete': 'delete', 'home': 'home', 'end': 'end',
+                            'pgup': 'pageup', 'pgdown': 'pagedown',
+                            'up': 'up', 'down': 'down', 'left': 'left', 'right': 'right',
+                            'space': 'space', 'f1': 'f1', 'f2': 'f2', 'f3': 'f3',
+                            'f4': 'f4', 'f5': 'f5', 'f6': 'f6', 'f7': 'f7',
+                            'f8': 'f8', 'f9': 'f9', 'f10': 'f10', 'f11': 'f11', 'f12': 'f12',
+                        }
+                        pyautogui.press(mapping.get(key_name, key_name))
+                        i += 1
+                else:
+                    # Plain text
+                    if token:
+                        pyautogui.write(token)
+                    i += 1
+
+        send_keys_parsed(keys)
         return f"Sent keys: {keys}"
     except Exception as e:
         logger.error(f"window_send_keys error: {e}")
