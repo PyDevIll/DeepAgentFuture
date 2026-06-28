@@ -52,22 +52,35 @@ except ImportError:
 def _find_window(identifier: str | int) -> auto.WindowControl | None:
     """
     Find a UI Automation window by handle (int) or title substring (str).
-    Returns a WindowControl or None.
+    Uses ControlFromHandle for reliable handle -> control mapping, with fallback to enumeration.
     """
     if not HAS_UIA:
         return None
+
     if isinstance(identifier, int):
-        # handle
+        # 1) Попробуем прямой доступ через ControlFromHandle
         try:
-            return auto.WindowControl(handle=identifier)
+            ctrl = auto.ControlFromHandle(identifier)
+            if ctrl and ctrl.ControlType == auto.ControlType.WindowControl:
+                return ctrl
         except Exception:
-            return None
-    # string: search by title (case-insensitive substring)
+            pass
+
+        # 2) Fallback: перебор всех окон и сравнение NativeWindowHandle
+        try:
+            desktop = auto.GetRootControl()
+            for w in desktop.GetChildren():
+                if w.ControlType == auto.ControlType.WindowControl:
+                    if w.NativeWindowHandle == identifier:
+                        return w
+        except Exception:
+            pass
+        return None
+
+    # Строковый поиск (регистронезависимый substring)
     try:
-        # get all top-level windows
         desktop = auto.GetRootControl()
-        windows = desktop.GetChildren()
-        for w in windows:
+        for w in desktop.GetChildren():
             if w.ControlType == auto.ControlType.WindowControl:
                 title = w.Name or ""
                 if identifier.lower() in title.lower():
@@ -75,7 +88,6 @@ def _find_window(identifier: str | int) -> auto.WindowControl | None:
     except Exception:
         pass
     return None
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Tool: window_list
