@@ -8,6 +8,19 @@ from typing import Optional
 from loguru import logger
 
 
+def _smart_decode(data: bytes) -> str:
+    """Decode bytes trying UTF-8 first, fallback to cp1251 (Russian Windows) on failure."""
+    try:
+        return data.decode('utf-8')
+    except UnicodeDecodeError:
+        pass
+    try:
+        return data.decode('cp1251')
+    except UnicodeDecodeError:
+        pass
+    return data.decode('utf-8', errors='replace')
+
+
 async def ping() -> str:
     """Simple ping/pong health check. Returns 'pong' with current timestamp."""
     from datetime import datetime
@@ -51,8 +64,8 @@ async def exec_python(parameter: str, timeout: int = 30) -> str:
             proc.communicate(), timeout=timeout
         )
         return json.dumps({
-            "stdout": stdout.decode('utf-8', errors='replace'),
-            "stderr": stderr.decode('utf-8', errors='replace'),
+            "stdout": _smart_decode(stdout),
+            "stderr": _smart_decode(stderr),
             "returncode": proc.returncode,
         }, ensure_ascii=False)
     except asyncio.TimeoutError:
@@ -87,8 +100,8 @@ async def exec_shell(command: str, timeout: int = 30) -> str:
         JSON string with stdout, stderr, returncode
     """
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "cmd.exe", "/c", command,
+        proc = await asyncio.create_subprocess_shell(
+            command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=os.getcwd(),
@@ -97,8 +110,8 @@ async def exec_shell(command: str, timeout: int = 30) -> str:
             proc.communicate(), timeout=timeout
         )
         return json.dumps({
-            "stdout": stdout.decode('utf-8', errors='replace'),
-            "stderr": stderr.decode('utf-8', errors='replace'),
+            "stdout": _smart_decode(stdout),
+            "stderr": _smart_decode(stderr),
             "returncode": proc.returncode,
         }, ensure_ascii=False)
     except asyncio.TimeoutError:
