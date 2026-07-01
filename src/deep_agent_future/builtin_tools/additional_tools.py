@@ -214,6 +214,43 @@ async def aider_run(
             pass
 
 
+
+async def schedule_task(prompt: str, delay_minutes: int = 10, chat_id: str = "430493782") -> str:
+    """Schedule an LLM self-call. On the next user message after delay expires,
+    the prompt is injected as if the user asked it. No external scheduler needed."""
+    from scheduler import get_scheduler
+    sched = get_scheduler()
+    task = sched.add_task(prompt, delay_minutes, chat_id)
+    return json.dumps({
+        "ok": True,
+        "task_id": task["id"],
+        "prompt": task["prompt"][:100],
+        "run_at": task["run_at_str"],
+        "message": f"Task {task['id']} scheduled at {task['run_at_str']}"
+    }, ensure_ascii=False)
+
+
+async def list_scheduled_tasks(chat_id: str = "") -> str:
+    """List all pending scheduled tasks, optionally filtered by chat_id."""
+    from scheduler import get_scheduler
+    sched = get_scheduler()
+    tasks = sched.list_tasks(chat_id=chat_id if chat_id else None)
+    if not tasks:
+        return json.dumps({"ok": True, "tasks": [], "message": "No pending tasks"}, ensure_ascii=False)
+    result = [{"id": t["id"], "prompt": t["prompt"][:120], "run_at": t["run_at_str"], "chat_id": t["chat_id"]} for t in tasks]
+    return json.dumps({"ok": True, "tasks_count": len(result), "tasks": result}, ensure_ascii=False)
+
+
+async def cancel_scheduled_task(task_id: str) -> str:
+    """Cancel a pending scheduled task by its ID."""
+    from scheduler import get_scheduler
+    sched = get_scheduler()
+    ok = sched.cancel_task(task_id)
+    if ok:
+        return json.dumps({"ok": True, "task_id": task_id, "message": "Task cancelled"}, ensure_ascii=False)
+    return json.dumps({"ok": False, "task_id": task_id, "message": "Not found or already completed"}, ensure_ascii=False)
+
+
 TOOL_DEFINITIONS = [
     ("ping", ping, "Simple ping/pong health check. Returns pong with current timestamp.", {
         "type": "object",
@@ -262,6 +299,28 @@ TOOL_DEFINITIONS = [
             "timeout": {"type": "integer", "description": "Execution timeout in seconds (default: 120)"},
         },
         "required": ["instruction", "files"],
+    }),
+    ("schedule_task", schedule_task, "Schedule an LLM self-call with arbitrary prompt after delay_minutes. On the next user message after the delay, the prompt is injected as if the user asked it.", {
+        "type": "object",
+        "properties": {
+            "prompt": {"type": "string", "description": "The prompt/question to ask the LLM when the time comes"},
+            "delay_minutes": {"type": "integer", "description": "Delay in minutes before execution (default: 10)"},
+            "chat_id": {"type": "string", "description": "Telegram chat ID for output (default: 430493782)"},
+        },
+        "required": ["prompt"],
+    }),
+    ("list_scheduled_tasks", list_scheduled_tasks, "List all pending scheduled tasks.", {
+        "type": "object",
+        "properties": {
+            "chat_id": {"type": "string", "description": "Optional filter by chat_id"},
+        },
+    }),
+    ("cancel_scheduled_task", cancel_scheduled_task, "Cancel a pending scheduled task by its ID.", {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string", "description": "ID of the task to cancel"},
+        },
+        "required": ["task_id"],
     }),
 ]
 

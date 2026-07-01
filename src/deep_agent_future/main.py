@@ -11,12 +11,16 @@ from agent import Agent, NOW
 from telegram_bot import TelegramBot
 from tool_registry import get_registry
 from builtin_tools import register_all as register_builtin_tools
+from scheduler import get_scheduler
 import sys
+
 
 def global_exception_handler(exc_type, exc_value, exc_traceback):
     logger.exception("Unhandled exception", exc_info=(exc_type, exc_value, exc_traceback))
 
+
 sys.excepthook = global_exception_handler
+
 
 async def main() -> None:
     """Start MASTERMIND v2."""
@@ -24,7 +28,7 @@ async def main() -> None:
 
     # Configure logging
     logger.remove()
-    logger.add(sys.stderr, level="DEBUG") #os.environ.get("LOG_LEVEL", "INFO"))
+    logger.add(sys.stderr, level="DEBUG")  # os.environ.get("LOG_LEVEL", "INFO"))
     logger.add(
         Path(__file__).resolve().parent / "data" / "agent.log",
         rotation="10 MB",
@@ -33,6 +37,9 @@ async def main() -> None:
     )
 
     logger.info("MASTERMIND v2 starting...")
+
+    # Global queue for incoming requests (user messages + scheduled tasks)
+    request_queue = asyncio.Queue()
 
     # Initialize tool registry with builtin tools
     registry = get_registry()
@@ -78,9 +85,14 @@ async def main() -> None:
     DOWNLOADS_DIR = Path(__file__).resolve().parent / "data" / "downloads"
     DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Message handler — defined first so handle_file can delegate to it
+    # ---- Request enqueuing ----
     async def handle_message(msg: dict) -> None:
-        """Process incoming text messages through the agent."""
+        """Enqueue incoming user messages for processing."""
+        await request_queue.put({"type": "user", "msg": msg})
+
+    # ---- Actual processing logic for user messages ----
+    async def process_user_message(msg: dict) -> None:
+        """Handle a user message: build context, run agent, send reply."""
         chat_id = msg["chat"]["id"]
 
         # Build rich message context
@@ -91,8 +103,7 @@ async def main() -> None:
         if msg.get("entities"):
             for ent in msg["entities"]:
                 ent_type = ent["type"]
-                # Extract the entity text from the original text using offset+length
-                entity_text = text[ent["offset"]:ent["offset"]+ent["length"]]
+                entity_text = text[ent["offset"]: ent["offset"] + ent["length"]]
                 ent_desc = f"  • {ent_type}: \"{entity_text}\""
                 if ent.get("url"):
                     ent_desc += f" → {ent['url']}"
@@ -147,7 +158,6 @@ async def main() -> None:
 
         enhanced_request = f"{context_str}\n\nUser request: {text}"
 
-        # ... rest stays the same (reasoning_callback, agent.run_with_crash_recovery, etc.)
         logger.info(f"Message from {chat_id}: {text[:100]}")
 
         async def reasoning_callback(thought: str) -> None:
@@ -161,6 +171,55 @@ async def main() -> None:
         if response:
             await bot.send_reply(chat_id, response)
 
+    # ---- Processing logic for scheduled tasks ----
+    async def process_scheduled_task(task: dict) -> None:
+        """Run agent with a scheduled prompt."""
+        chat_id = task["chat_id"]
+        prompt = task["prompt"]
+        logger.info(f"Processing scheduled task {task['id']}: {prompt[:100]}")
+
+        async def reasoning_callback(thought: str) -> None:
+            await bot.send_reasoning(thought)
+
+        response = await agent.run_with_crash_recovery(
+            initial_user_request=prompt,
+            reasoning_callback=reasoning_callback,
+        )
+
+        if response:
+            await bot.send_reply(chat_id, f"🕒 **Scheduled task result:**\n\n{response}")
+
+        scheduler = get_scheduler()
+        scheduler.mark_done(task["id"])
+
+    # ---- Worker coroutine (processes requests sequentially) ----
+    async def worker() -> None:
+        """Process requests from the queue sequentially."""
+        while True:
+            req = await request_queue.get()
+            try:
+                if req["type"] == "user":
+                    await process_user_message(req["msg"])
+                elif req["type"] == "scheduled":
+                    await process_scheduled_task(req["task"])
+            except Exception as e:
+                logger.exception(f"Worker failed processing {req.get('type')}: {e}")
+            finally:
+                request_queue.task_done()
+
+    # ---- Scheduler checker (polls due tasks every 60 seconds) ----
+    async def scheduler_checker() -> None:
+        """Poll the scheduler every minute and enqueue due tasks."""
+        while True:
+            await asyncio.sleep(60)
+            sched = get_scheduler()
+            due = sched.get_due_tasks()
+            if due:
+                logger.info(f"Found {len(due)} due scheduled task(s)")
+                for task in due:
+                    await request_queue.put({"type": "scheduled", "task": task})
+
+    # ---- File handler (unchanged from original) ----
     async def handle_file(msg: dict) -> None:
         """Download incoming documents/photos/voice and route to processing."""
         chat_id = msg["chat"]["id"]
@@ -232,9 +291,14 @@ async def main() -> None:
 
     bot.set_file_handler(handle_file)
 
-    # Start polling
-    logger.info("Starting Telegram polling...")
-    await bot.start_polling(handle_message)
+    # Start all components concurrently
+    logger.info("Starting Telegram polling, worker, and scheduler checker...")
+    polling_task = asyncio.create_task(bot.start_polling(handle_message))
+    worker_task = asyncio.create_task(worker())
+    checker_task = asyncio.create_task(scheduler_checker())
+
+    logger.info("All components started. Awaiting tasks...")
+    await asyncio.gather(polling_task, worker_task, checker_task)
 
 
 if __name__ == "__main__":
