@@ -13,7 +13,6 @@ from openai import AsyncOpenAI
 from loguru import logger
 
 from context_manager import ContextPool
-# from tool_registry import get_registry   # <-- always fetch live
 from deep_agent_future.tool_registry import get_registry
 
 LLM_MAX_OUTPUT_TOKENS = 30000
@@ -91,8 +90,6 @@ class Agent:
         self._save_history = save_history
         self._helper_agent: Optional[Agent] = None
         self.messages = ContextPool()
-        # DO NOT CACHE registry – always fetch live to support hot‑reload
-        # self._registry = get_registry()  <-- REMOVED
 
         # Load last memory into context (from previous compression)
         if self._last_memory:
@@ -176,7 +173,7 @@ class Agent:
 
         Critical: every assistant message MUST have non-empty content OR tool_calls.
         """
-        self.messages.log_state("STATE AT build_messager_for_llm")
+        self.messages.log_state("STATE AT build_messages_for_llm")
         messages: list[dict] = []
 
         # Layer 0: System prompt (static → prefix-cached by DeepSeek)
@@ -195,14 +192,27 @@ class Agent:
                 "content": persistent,
             })
 
-        # Layer 3: Compressed history (LLM summaries of old batches)
-        for entry in self.messages._compressed:
-            d = {"role": entry.role, "content": entry.content or ""}
-            if entry.reasoning:
-                d["reasoning_content"] = entry.reasoning
-            if entry.tool_calls:
-                d["tool_calls"] = entry.tool_calls
-            messages.append(d)
+        # Layer 3: Compressed history (structured summaries from _compressed_dicts)
+        for comp_dict in self.messages._compressed_dicts:
+            # Build a single assistant message from the structured sections
+            content_parts = []
+            if comp_dict.get("facts"):
+                content_parts.append(f"**Key Facts:**\n{comp_dict['facts']}")
+            if comp_dict.get("tool_results"):
+                content_parts.append(f"**Tool Results:**\n{comp_dict['tool_results']}")
+            if comp_dict.get("decisions"):
+                content_parts.append(f"**Decisions:**\n{comp_dict['decisions']}")
+            if not content_parts and comp_dict.get("raw_text"):
+                content_parts.append(comp_dict["raw_text"])
+            if not content_parts:
+                content_parts.append("[No structured summary]")
+            content = "\n\n".join(content_parts)
+            messages.append({
+                "role": "assistant",
+                "content": content,
+                # Optionally add timestamp as metadata if needed
+                "time": comp_dict.get("timestamp", ""),
+            })
 
         # Layer 4: Masked observations (old tool outputs replaced with [MASKED: ...])
         for entry in self.messages.masked_entries:

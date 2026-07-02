@@ -1,4 +1,4 @@
-"""Context Manager v3 — Hybrid Observation Masking + LLM Summarization + Layered Memory.
+"""Context Manager v4 — Hybrid Observation Masking + LLM Summarization + Layered Memory.
 
 Based on Lindenbauer et al. (NeurIPS 2025): observation masking as first line,
 LLM summarization as last resort. Structured in 4 memory layers with token budget.
@@ -13,16 +13,42 @@ Layers (ordered by proximity to LLM):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
-import os
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import IntEnum
 from pathlib import Path
 from typing import Optional
 
+import tiktoken
 from loguru import logger
+
+# ── Tokenizer ──────────────────────────────────────────────────────────
+_tokenizer = None
+
+
+def _get_tokenizer():
+    global _tokenizer
+    if _tokenizer is None:
+        try:
+            _tokenizer = tiktoken.get_encoding("cl100k_base")
+        except Exception as e:
+            logger.warning(f"tiktoken not available, falling back to char/3: {e}")
+            _tokenizer = None
+    return _tokenizer
+
+
+def _token_count(text: str) -> int:
+    """Return token count using tiktoken (fallback to char/3)."""
+    tokenizer = _get_tokenizer()
+    if tokenizer:
+        tokens = tokenizer.encode_ordinary(text)
+        return len(tokens)
+    return max(1, len(text) // 3)
+
 
 # ── Constants ──────────────────────────────────────────────────────────
 DEFAULT_MAX_TOKENS = 100000          # soft cap; proactive trim at 80%
@@ -55,6 +81,7 @@ class MemoryEntry:
     masked: bool = False
     layer: Layer = Layer.SLIDING
 
+
 @dataclass
 class TokenBudget:
     limit: int
@@ -69,12 +96,38 @@ class TokenBudget:
         return self.used / self.limit if self.limit > 0 else 0
 
     def count(self, text: str) -> int:
-        """Rough token estimate: ~chars/3.5 for multilingual text."""
-        return max(1, len(text) // 3)
+        return _token_count(text)
+
+
+# ── Utility helper ─────────────────────────────────────────────────────
+def _truncate_first_last(text: str, max_first: int = 200, max_last: int = 200) -> str:
+    """Keep first max_first chars and last max_last chars, join with [...]."""
+    if len(text) <= max_first + max_last + 20:
+        return text
+    first_part = text[:max_first]
+    last_part = text[-max_last:]
+    return f"{first_part}\n…[truncated {len(text) - max_first - max_last} chars]…\n{last_part}"
+
+
+def _is_likely_json(text: str) -> bool:
+    text = text.strip()
+    if (text.startswith('{') and text.endswith('}')) or (text.startswith('[') and text.endswith(']')):
+        try:
+            json.loads(text)
+            return True
+        except json.JSONDecodeError:
+            return False
+    return False
+
 
 # ── Observation Masker ─────────────────────────────────────────────────
 class ObservationMasker:
-    """Replaces verbose tool outputs with compact [MASKED: tool → result] placeholders."""
+    """Replaces verbose tool outputs with compact placeholders.
+
+    Improved variant:
+      - Keeps full content if length < 500 chars or valid JSON.
+      - Truncates large outputs to first + last lines (200 chars each).
+    """
 
     @staticmethod
     def mask(entry: MemoryEntry) -> MemoryEntry:
@@ -84,15 +137,11 @@ class ObservationMasker:
         content = entry.content or ""
         tool = entry.tool_name or "unknown"
 
-        # Extract 1-line summary: first non-empty meaningful line
-        lines = [l.strip() for l in content.split('\n') if l.strip()]
-        summary = ""
-        if lines:
-            first = lines[0]
-            # Truncate to ~120 chars for the mask
-            summary = first[:120] + ("…" if len(first) > 120 else "")
-
-        masked_content = f"[MASKED: {tool} → {summary}]" if summary else f"[MASKED: {tool}]"
+        # Keep small outputs and JSON structures intact
+        if len(content) < 500 or _is_likely_json(content):
+            masked_content = content
+        else:
+            masked_content = _truncate_first_last(content, max_first=200, max_last=200)
 
         masked_entry = MemoryEntry(
             role=entry.role,
@@ -104,6 +153,7 @@ class ObservationMasker:
             layer=Layer.MASKED,
         )
         return masked_entry
+
 
 # ── Persistent Store ───────────────────────────────────────────────────
 class PersistentStore:
@@ -145,10 +195,11 @@ class PersistentStore:
             lines.append(f"- **{k}**: {v}")
         return "\n".join(lines) + "\n"
 
+
 # ── Context Assembler ──────────────────────────────────────────────────
 class ContextAssembler:
     """Assembles memory layers into a single context string for the LLM.
-    
+
     Order (DeepSeek cache-optimized):
       system → persistent → compressed → masked → sliding → current
     """
@@ -222,6 +273,7 @@ class ContextAssembler:
         else:
             return f"**{entry.role.upper()}** {time_str}\n{entry.content}"
 
+
 # ── ContextPool v3 ─────────────────────────────────────────────────────
 class ContextPool:
     """Hybrid context manager with observation masking, LLM summarization, and crash recovery."""
@@ -238,9 +290,8 @@ class ContextPool:
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         # Memory layers
-        self._all_entries: list[MemoryEntry] = []     # master log
-        self._compressed: list[MemoryEntry] = []       # L3
-        self._masked: list[MemoryEntry] = []           # L2 (managed automatically)
+        self._all_entries: list[MemoryEntry] = []   # master log
+        self._compressed_dicts: list[dict] = []      # L3 structured summaries
 
         # Infrastructure
         self._masker = ObservationMasker()
@@ -248,6 +299,11 @@ class ContextPool:
         self._assembler = ContextAssembler(token_limit=max_tokens)
         self._save_counter: int = 0
         self.overflow: bool = False
+
+        # Caches
+        self._token_counts: dict[int, int] = {}   # id(entry) -> token count
+        self._compress_lock = asyncio.Lock()
+        self._save_lock = threading.Lock()
 
         # Attempt crash recovery
         self._restore_if_needed()
@@ -277,17 +333,18 @@ class ContextPool:
 
     # ── Core API ───────────────────────────────────────────────────
     def get_context_length(self) -> int:
-        """Estimate token count of entire context."""
+        """Estimate token count of entire context using tiktoken."""
         total = 0
         for entry in self._all_entries:
-            total += len(entry.content or "") + len(entry.reasoning or "")
-        return total // 3  # rough token estimate
+            total += self._token_count_entry(entry)
+        return total
 
     def append(self, message: dict, save: bool = False) -> None:
         """Append a raw message dict."""
         entry = self._dict_to_entry(message)
         self._all_entries.append(entry)
         self._save_counter += 1
+        self._token_counts.clear()          # invalidate cache
 
         if save:
             self._save_to_file(entry)
@@ -309,6 +366,7 @@ class ContextPool:
         )
         self._all_entries.append(entry)
         self._save_counter += 1
+        self._token_counts.clear()
 
         if save:
             self._save_to_file(entry)
@@ -320,7 +378,8 @@ class ContextPool:
     def assign_messages(self, messages: list[dict]) -> None:
         """Bulk load messages (e.g., from last memory)."""
         self._all_entries = [self._dict_to_entry(m) for m in messages]
-        self._clean_orphaned_tools()
+        self._token_counts.clear()
+        # No orphan deletion – tool messages are kept.
 
     def get_chat_history(self, messages: Optional[list[dict]] = None) -> str:
         """Render chat history as markdown string (for compression)."""
@@ -338,104 +397,152 @@ class ContextPool:
     def build_context(self, system_prompt: str = "") -> tuple[str, TokenBudget]:
         """Assemble full context from all layers. Returns (text, budget)."""
         persistent = self._persistent.as_context_string()
+        # Convert compressed dicts to MemoryEntry list for assembly
+        compressed_mems = [self._compressed_dict_to_entry(d) for d in self._compressed_dicts]
         return self._assembler.assemble(
             system_prompt=system_prompt,
             persistent=persistent,
-            compressed=self._compressed,
+            compressed=compressed_mems,
             masked=self.masked_entries,
             sliding=self.sliding_window,
         )
 
     # ── Compression ────────────────────────────────────────────────
     async def compress(self, helper_agent) -> Optional[str]:
-        """LLM summarization — last resort for large batches."""
-        # Token-based trigger: compress at 80% budget OR 20+ entries
-        self.log_state("BEFORE compression")
+        """LLM summarization — last resort for large batches (structured output)."""
+        async with self._compress_lock:
+            self.log_state("BEFORE compression")
 
-        est_tokens = self.get_context_length()
-        overflow_ratio = est_tokens / self.max_tokens if self.max_tokens > 0 else 0
-        enough_entries = len(self._all_entries) >= 20
-        token_overflow = overflow_ratio >= 0.80
+            est_tokens = self.get_context_length()
+            overflow_ratio = est_tokens / self.max_tokens if self.max_tokens > 0 else 0
+            enough_entries = len(self._all_entries) >= 20
+            token_overflow = overflow_ratio >= 0.70
+            enough_old = (len(self._all_entries) - self.window_size) >= 10
 
-        if not helper_agent:
-            return None
-        if not enough_entries and not token_overflow:
-            return None
-        if len(self._all_entries) < 3:
-            return None
+            if not helper_agent:
+                return None
+            if not enough_entries and not token_overflow:
+                return None
+            if not enough_old and not token_overflow:
+                return None
+            if len(self._all_entries) < 3:
+                return None
 
-        logger.info(
-            f"Context compression triggered: {len(self._all_entries)} entries, "
-            f"{est_tokens} tokens ({overflow_ratio:.0%})"
-        )
+            logger.info(
+                f"Context compression triggered: {len(self._all_entries)} entries, "
+                f"{est_tokens} tokens ({overflow_ratio:.0%})"
+            )
 
-        # Take the oldest batch beyond sliding window
-        batch = self._all_entries[: -self.window_size]
-        if not batch:
-            return None
+            # Take the oldest batch beyond sliding window
+            batch = self._all_entries[: -self.window_size]
+            if not batch:
+                return None
 
-        chat_text = self.get_chat_history(
-            [self._entry_to_dict(e) for e in batch]
-        )
+            chat_text = self.get_chat_history(
+                [self._entry_to_dict(e) for e in batch]
+            )
 
-        helper_message = {
-            "role": "user",
-            "name": "MASTERMIND",
-            "content": (
-                "**ACTION**: COMPRESS\n\n"
-                "Retain: key decisions, file changes, tool results, user intent, errors.\n"
-                "Discard: redundant reasoning, repeated tool calls, noise.\n\n"
-                "**CONTENT**:\n" + chat_text
-            ),
+            helper_message = {
+                "role": "user",
+                "name": "MASTERMIND",
+                "content": (
+                    "**ACTION**: COMPRESS\n\n"
+                    "Output a **structured summary** with the following sections:\n"
+                    "- **Key Facts:** (decisions, important data, user intent)\n"
+                    "- **Tool Results:** (critical outputs, file contents, search snippets)\n"
+                    "- **Decisions:** (what was decided/changed)\n\n"
+                    "Use bullet points. Keep relevant details, discard noise.\n\n"
+                    "**CONTENT**:\n" + chat_text
+                ),
+            }
+
+            # Use helper agent for compression (async)
+            try:
+                helper_agent.messages.assign_messages([helper_message])
+                response = await helper_agent.llm_request()
+            except Exception as e:
+                logger.error(f"Compression helper LLM call failed: {e}")
+                return None
+
+            # Extract compressed text
+            if isinstance(response, dict):
+                compressed_text = response["choices"][0]["message"]["content"]
+            else:
+                compressed_text = response.choices[0].message.content
+
+            # Parse structured sections from LLM response
+            parsed = self._parse_compressed_text(compressed_text)
+            now = datetime.now().strftime("%d.%m.%Y, %H:%M")
+            parsed["timestamp"] = now
+
+            # Store as dict for structured access
+            self._compressed_dicts.append(parsed)
+            logger.info(
+                f"Compressed entry added: structured dict length={len(parsed)} "
+                f"content length={len(compressed_text)}"
+            )
+
+            # Trim old entries: keep only last window_size
+            kept = self._all_entries[-self.window_size:]
+            self._all_entries = kept
+            self._token_counts.clear()
+            # No orphan deletion – tool messages are kept.
+
+            # Save to disk
+            comp_file = self._data_dir / "compressed_history.txt"
+            with open(comp_file, 'a', encoding='utf-8') as f:
+                f.write(f"# Compressed {len(batch)} turns:\n{compressed_text}\n\n")
+
+            last_file = self._data_dir / "last_compression.txt"
+            with open(last_file, 'w', encoding='utf-8') as f:
+                f.write(compressed_text + "\n\n")
+
+            self.overflow = False
+            self._check_overflow()
+            logger.info(
+                f"Compression complete: {len(batch)} turns → summary, "
+                f"context now ~{self.get_context_length()} tokens"
+            )
+
+            self.log_state("AFTER compression")
+            return compressed_text
+
+    @staticmethod
+    def _parse_compressed_text(text: str) -> dict:
+        """Parse LLM response into structured dict with sections using robust regex."""
+        # Define patterns for each section (case-insensitive, optional bold/asterisks)
+        patterns = {
+            "facts": r'\*\*Key Facts:\*\*\s*(.*?)(?=\*\*Tool Results:\*\*|\*\*Decisions:\*\*|$)',
+            "tool_results": r'\*\*Tool Results:\*\*\s*(.*?)(?=\*\*Key Facts:\*\*|\*\*Decisions:\*\*|$)',
+            "decisions": r'\*\*Decisions:\*\*\s*(.*?)(?=\*\*Key Facts:\*\*|\*\*Tool Results:\*\*|$)',
+        }
+        # Also try with leading dash (bullet) variants
+        alt_patterns = {
+            "facts": r'-\s*\*\*Key Facts:\*\*\s*(.*?)(?=-\s*\*\*Tool Results:\*\*|-\s*\*\*Decisions:\*\*|$)',
+            "tool_results": r'-\s*\*\*Tool Results:\*\*\s*(.*?)(?=-\s*\*\*Key Facts:\*\*|-\s*\*\*Decisions:\*\*|$)',
+            "decisions": r'-\s*\*\*Decisions:\*\*\s*(.*?)(?=-\s*\*\*Key Facts:\*\*|-\s*\*\*Tool Results:\*\*|$)',
         }
 
-        # Use helper agent for compression (async)
-        try:
-            helper_agent.messages.assign_messages([helper_message])
-            response = await helper_agent.llm_request()
-        except Exception as e:
-            logger.error(f"Compression helper LLM call failed: {e}")
-            return None
+        sections = {"facts": "", "tool_results": "", "decisions": ""}
+        # Try primary patterns first
+        for key, pattern in patterns.items():
+            match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+            if match:
+                sections[key] = match.group(1).strip()
+        # If any section missing, try alt patterns
+        for key, pattern in alt_patterns.items():
+            if not sections[key]:
+                match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+                if match:
+                    sections[key] = match.group(1).strip()
 
-        # Extract compressed text
-        if isinstance(response, dict):
-            compressed_text = response["choices"][0]["message"]["content"]
+        # Fallback: if still empty, treat entire text as raw
+        if not any(sections.values()):
+            sections["raw_text"] = text
         else:
-            compressed_text = response.choices[0].message.content
+            sections["raw_text"] = text
 
-        # Store compression
-        comp_entry = MemoryEntry(
-            role="assistant",
-            content=f"[COMPRESSED HISTORY — {len(batch)} turns]\n{compressed_text}",
-            time=datetime.now().strftime("%d.%m.%Y, %H:%M"),
-            layer=Layer.COMPRESSED,
-        )
-        logger.info(f"Compressed entry added: role={comp_entry.role}, content length={len(comp_entry.content)}")
-        self._compressed.append(comp_entry)
-
-        # Trim old entries: keep only last window_size + append compressed
-        kept = self._all_entries[-self.window_size:]
-        self._all_entries = kept
-        self._clean_orphaned_tools()
-
-        # Save to disk
-        comp_file = self._data_dir / "compressed_history.txt"
-        with open(comp_file, 'a', encoding='utf-8') as f:
-            f.write(f"# Compressed {len(batch)} turns:\n{compressed_text}\n\n")
-
-        last_file = self._data_dir / "last_compression.txt"
-        with open(last_file, 'w', encoding='utf-8') as f:
-            f.write(compressed_text + "\n\n")
-
-        self.overflow = False
-        self._check_overflow()
-        logger.info(
-            f"Compression complete: {len(batch)} turns → summary, "
-            f"context now ~{self.get_context_length()} tokens"
-        )
-
-        self.log_state("AFTER compression")
-        return compressed_text
+        return sections
 
     # ── Crash Recovery ─────────────────────────────────────────────
     def _restore_if_needed(self) -> bool:
@@ -445,8 +552,16 @@ class ContextPool:
             return False
         try:
             raw = json.loads(save_file.read_text(encoding='utf-8'))
-            self._all_entries = [self._dict_to_entry(m) for m in raw]
-            self._clean_orphaned_tools()
+            if "all_entries" in raw:
+                self._all_entries = [self._dict_to_entry(m) for m in raw["all_entries"]]
+            else:
+                # backward-compat: whole file was list of entries
+                self._all_entries = [self._dict_to_entry(m) for m in raw]
+            if "compressed_dicts" in raw:
+                self._compressed_dicts = raw["compressed_dicts"]
+            else:
+                self._compressed_dicts = []
+            self._token_counts.clear()
             self._check_overflow()
             if self.overflow:
                 logger.warning(
@@ -461,14 +576,18 @@ class ContextPool:
             return False
 
     def _emergency_save(self) -> None:
-        """Save full state as JSON."""
-        save_file = self._data_dir / EMERGENCY_FILE
-        try:
-            raw = [self._entry_to_dict(e) for e in self._all_entries]
-            save_file.write_text(json.dumps(raw, ensure_ascii=False, default=str), encoding='utf-8')
-            logger.debug(f"Emergency save: {len(raw)} entries")
-        except Exception as e:
-            logger.error(f"Emergency save failed: {e}")
+        """Save full state as JSON (both entries and compressed dicts)."""
+        with self._save_lock:
+            save_file = self._data_dir / EMERGENCY_FILE
+            try:
+                raw = {
+                    "all_entries": [self._entry_to_dict(e) for e in self._all_entries],
+                    "compressed_dicts": self._compressed_dicts,
+                }
+                save_file.write_text(json.dumps(raw, ensure_ascii=False, default=str), encoding='utf-8')
+                logger.debug(f"Emergency save: {len(raw['all_entries'])} entries, {len(raw['compressed_dicts'])} compressed")
+            except Exception as e:
+                logger.error(f"Emergency save failed: {e}")
 
     def restore_from_emergency(self) -> bool:
         """Public API: manual restore."""
@@ -494,6 +613,30 @@ class ContextPool:
             tool_name=msg.get("name", ""),
             tool_call_id=msg.get("tool_call_id", ""),
             tool_calls=msg.get("tool_calls", []),
+        )
+
+    def _compressed_dict_to_entry(self, d: dict) -> MemoryEntry:
+        """Convert compressed dict to MemoryEntry for context assembly."""
+        content_lines = []
+        if d.get("facts"):
+            content_lines.append(f"**Key Facts:**\n{d['facts']}")
+        if d.get("tool_results"):
+            content_lines.append(f"**Tool Results:**\n{d['tool_results']}")
+        if d.get("decisions"):
+            content_lines.append(f"**Decisions:**\n{d['decisions']}")
+        if not content_lines:
+            # Fallback to raw text or a placeholder
+            raw = d.get("raw_text", "")
+            if raw:
+                content_lines.append(raw)
+            else:
+                content_lines.append("[No structured summary]")
+        content = "\n\n".join(content_lines)
+        return MemoryEntry(
+            role="assistant",
+            content=content,
+            time=d.get("timestamp", ""),
+            layer=Layer.COMPRESSED,
         )
 
     def _entry_to_dict(self, entry: MemoryEntry) -> dict:
@@ -548,19 +691,26 @@ class ContextPool:
         return d
 
     def _check_overflow(self) -> None:
-        """Check token budget and set overflow flag."""
+        """Check token budget and set overflow flag.
+        Trigger compression at 70% of max_tokens OR >=10 entries older than sliding window.
+        """
         est_tokens = self.get_context_length()
-        if est_tokens > self.max_tokens * 0.8:
+        overflow_token = est_tokens > self.max_tokens * 0.7
+        old_entries = len(self._all_entries) - self.window_size
+        overflow_old = (old_entries >= 10)
+        if overflow_token or overflow_old:
             self.overflow = True
-            logger.warning(f"Context at {est_tokens} tokens ({est_tokens/self.max_tokens:.0%}) — overflow")
+            logger.warning(
+                f"Context at {est_tokens} tokens ({est_tokens/self.max_tokens:.0%}), "
+                f"old entries {old_entries} — overflow"
+            )
         else:
             self.overflow = False
 
     def _auto_mask(self) -> None:
         """Automatically mask tool outputs beyond sliding window."""
-        if len(self._all_entries) <= self.window_size + MASK_BATCH_SIZE:
-            return
-        # Masking happens lazily via masked_entries property; nothing to do eagerly
+        # Masking happens lazily via masked_entries property; nothing to do eagerly.
+        # Kept for future proactive masking if needed.
         pass
 
     def _periodic_save(self) -> None:
@@ -580,6 +730,13 @@ class ContextPool:
         except Exception as e:
             logger.error(f"History save failed: {e}")
 
+    def _token_count_entry(self, entry: MemoryEntry) -> int:
+        """Return cached token count for a MemoryEntry."""
+        eid = id(entry)
+        if eid not in self._token_counts:
+            text = (entry.content or "") + (entry.reasoning or "")
+            self._token_counts[eid] = _token_count(text)
+        return self._token_counts[eid]
 
     def log_state(self, tag: str = "") -> None:
         logger.info(f"=== Context state {tag} ===")
@@ -588,29 +745,18 @@ class ContextPool:
         if self.sliding_window:
             first = self.sliding_window[0]
             last = self.sliding_window[-1]
-            # Safe preview: handle None content
             first_preview = (first.content[:50] if first.content else "[No content]")
             last_preview = (last.content[:50] if last.content else "[No content]")
             logger.info(f"    first: {first.role} '{first_preview}'")
             logger.info(f"    last:  {last.role} '{last_preview}'")
-        logger.info(f"  Compressed entries: {len(self._compressed)}")
+        logger.info(f"  Compressed entries (dicts): {len(self._compressed_dicts)}")
+        total_comp_tokens = sum(
+            _token_count((d.get("facts","") + d.get("tool_results","") + d.get("decisions","")))
+            for d in self._compressed_dicts
+        )
+        logger.info(f"    tokens: ~{total_comp_tokens}")
         logger.info(f"  Masked entries (old): {len(self.masked_entries)}")
         logger.info(f"  Persistent facts: {len(self._persistent.facts)}")
         logger.info(f"  Estimated tokens: {self.get_context_length()}")
         logger.info(f"  Overflow flag: {self.overflow}")
         logger.info("=====================================")
-
-
-    def _clean_orphaned_tools(self) -> None:
-        """Remove tool messages that have no matching assistant with tool_calls."""
-        # Collect all valid tool_call_ids from assistant messages
-        valid_ids = set()
-        for entry in self._all_entries:
-            if entry.role == "assistant" and entry.tool_calls:
-                for tc in entry.tool_calls:
-                    valid_ids.add(tc["id"])
-        # Keep only tool messages whose id is in valid_ids
-        self._all_entries = [
-            e for e in self._all_entries
-            if not (e.role == "tool" and e.tool_call_id not in valid_ids)
-        ]
